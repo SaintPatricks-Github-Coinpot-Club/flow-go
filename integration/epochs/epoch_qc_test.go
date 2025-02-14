@@ -70,10 +70,19 @@ func (s *Suite) TestEpochQuorumCertificate() {
 		key, signer := test.AccountKeyGenerator().NewWithSigner()
 
 		// create account on emualted chain
-		address, err := s.blockchain.CreateAccount([]*sdk.AccountKey{key}, []sdktemplates.Contract{})
+		address, err := s.emulatorClient.CreateAccount([]*sdk.AccountKey{key}, []sdktemplates.Contract{})
 		s.Require().NoError(err)
 
-		client := epochs.NewQCContractClient(zerolog.Nop(), s.emulatorClient, flow.ZeroID, nodeID, address.String(), 0, s.qcAddress.String(), signer)
+		client := epochs.NewQCContractClient(
+			zerolog.Nop(),
+			s.emulatorClient,
+			flow.ZeroID,
+			nodeID,
+			address.String(),
+			0,
+			s.qcAddress.String(),
+			signer,
+		)
 		s.Require().NoError(err)
 
 		local := &modulemock.Local{}
@@ -89,7 +98,7 @@ func (s *Suite) TestEpochQuorumCertificate() {
 		hotSigner.On("CreateVote", mock.Anything).Return(vote, nil)
 
 		snapshot := &protomock.Snapshot{}
-		snapshot.On("Phase").Return(flow.EpochPhaseSetup, nil)
+		snapshot.On("EpochPhase").Return(flow.EpochPhaseSetup, nil)
 
 		state := &protomock.State{}
 		state.On("CanonicalRootBlock").Return(rootBlock)

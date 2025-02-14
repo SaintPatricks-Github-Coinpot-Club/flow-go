@@ -30,7 +30,7 @@ func Logger() zerolog.Logger {
 		writer = os.Stderr
 	}
 
-	return LoggerWithWriterAndLevel(writer, zerolog.DebugLevel)
+	return LoggerWithWriterAndLevel(writer, zerolog.InfoLevel)
 }
 
 func LoggerWithWriterAndLevel(writer io.Writer, level zerolog.Level) zerolog.Logger {
@@ -41,7 +41,7 @@ func LoggerWithWriterAndLevel(writer io.Writer, level zerolog.Level) zerolog.Log
 	return log
 }
 
-// go:noinline
+//go:noinline
 func LoggerForTest(t *testing.T, level zerolog.Level) zerolog.Logger {
 	_, file, _, ok := runtime.Caller(1)
 	if !ok {

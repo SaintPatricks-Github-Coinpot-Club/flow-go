@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/cadence"
+	"github.com/onflow/cadence/common"
 	"github.com/onflow/cadence/runtime"
-	"github.com/onflow/cadence/runtime/common"
 
 	"github.com/onflow/flow-go/fvm"
 	"github.com/onflow/flow-go/fvm/blueprints"
@@ -34,7 +34,10 @@ func TestGetExecutionMemoryWeights(t *testing.T) {
 			reusableRuntime.NewReusableCadenceRuntime(
 				&testutil.TestInterpreterRuntime{
 					ReadStoredFunc: readStored,
-				}))
+				},
+				runtime.Config{},
+			),
+		)
 		envMock.On("ReturnCadenceRuntime", mock.Anything).Return()
 		return envMock
 	}
@@ -161,7 +164,10 @@ func TestGetExecutionEffortWeights(t *testing.T) {
 			reusableRuntime.NewReusableCadenceRuntime(
 				&testutil.TestInterpreterRuntime{
 					ReadStoredFunc: readStored,
-				}))
+				},
+				runtime.Config{},
+			),
+		)
 		envMock.On("ReturnCadenceRuntime", mock.Anything).Return()
 		return envMock
 	}

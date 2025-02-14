@@ -9,24 +9,24 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/schollz/progressbar/v3"
 
+	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/interpreter"
 	cadenceRuntime "github.com/onflow/cadence/runtime"
-	"github.com/onflow/cadence/runtime/common"
-	"github.com/onflow/cadence/runtime/interpreter"
 
-	"github.com/onflow/flow-go/cmd/util/ledger/migrations"
-	"github.com/onflow/flow-go/fvm"
+	"github.com/onflow/flow-go/cmd/util/ledger/util"
 	"github.com/onflow/flow-go/fvm/environment"
-	"github.com/onflow/flow-go/fvm/state"
+	"github.com/onflow/flow-go/fvm/storage/state"
+	"github.com/onflow/flow-go/fvm/systemcontracts"
 	"github.com/onflow/flow-go/ledger"
 	"github.com/onflow/flow-go/model/flow"
 )
 
 const FungibleTokenTrackerReportPrefix = "fungible_token_report"
 
-var domains = []string{
-	common.PathDomainPublic.Identifier(),
-	common.PathDomainPrivate.Identifier(),
-	common.PathDomainStorage.Identifier(),
+var domains = []common.StorageDomain{
+	common.StorageDomainPathPublic,
+	common.StorageDomainPathPrivate,
+	common.StorageDomainPathStorage,
 }
 
 // FungibleTokenTracker iterates through stored cadence values over all accounts and check for any
@@ -41,7 +41,8 @@ type FungibleTokenTracker struct {
 }
 
 func FlowTokenTypeID(chain flow.Chain) string {
-	return fmt.Sprintf("A.%s.FlowToken.Vault", fvm.FlowTokenAddress(chain).Hex())
+	sc := systemcontracts.SystemContractsForChain(chain.ChainID())
+	return fmt.Sprintf("A.%s.FlowToken.Vault", sc.FlowToken.Address.Hex())
 }
 
 func NewFungibleTokenTracker(logger zerolog.Logger, rwf ReportWriterFactory, chain flow.Chain, vaultTypeIDs []string) *FungibleTokenTracker {
@@ -141,12 +142,19 @@ func (r *FungibleTokenTracker) worker(
 	wg *sync.WaitGroup) {
 	for j := range jobs {
 
-		view := migrations.NewView(j.payloads)
-		txnState := state.NewTransactionState(view, state.DefaultParameters())
+		inter, err := interpreter.NewInterpreter(nil, nil, &interpreter.Config{})
+		if err != nil {
+			panic(err)
+		}
+
+		txnState := state.NewTransactionState(
+			NewStorageSnapshotFromPayload(j.payloads),
+			state.DefaultParameters())
 		accounts := environment.NewAccounts(txnState)
 		storage := cadenceRuntime.NewStorage(
-			&migrations.AccountsAtreeLedger{Accounts: accounts},
+			&util.AccountsAtreeLedger{Accounts: accounts},
 			nil,
+			cadenceRuntime.StorageConfig{},
 		)
 
 		owner, err := common.BytesToAddress(j.owner[:])
@@ -154,17 +162,17 @@ func (r *FungibleTokenTracker) worker(
 			panic(err)
 		}
 
-		inter, err := interpreter.NewInterpreter(nil, nil, &interpreter.Config{})
-		if err != nil {
-			panic(err)
-		}
-
 		for _, domain := range domains {
-			storageMap := storage.GetStorageMap(owner, domain, true)
+			storageMap := storage.GetDomainStorageMap(inter, owner, domain, true)
 			itr := storageMap.Iterator(inter)
 			key, value := itr.Next()
 			for value != nil {
-				r.iterateChildren(append([]string{domain}, key), j.owner, value)
+				identifier := string(key.(interpreter.StringAtreeValue))
+				r.iterateChildren(
+					append([]string{domain.Identifier()}, identifier),
+					j.owner,
+					value,
+				)
 				key, value = itr.Next()
 			}
 		}
@@ -194,7 +202,11 @@ func (r *FungibleTokenTracker) iterateChildren(tr trace, addr flow.Address, valu
 	if compValue.IsResourceKinded(nil) {
 		typeIDStr := string(compValue.TypeID())
 		if _, ok := r.vaultTypeIDs[typeIDStr]; ok {
-			b := uint64(compValue.GetField(inter, nil, "balance").(interpreter.UFix64Value))
+			b := uint64(compValue.GetField(
+				inter,
+				interpreter.EmptyLocationRange,
+				"balance",
+			).(interpreter.UFix64Value))
 			if b > 0 {
 				r.rw.Write(TokenDataPoint{
 					Path:    tr.String(),
@@ -207,8 +219,13 @@ func (r *FungibleTokenTracker) iterateChildren(tr trace, addr flow.Address, valu
 
 		// iterate over fields of the composite value (skip the ones that are not resource typed)
 		compValue.ForEachField(inter,
-			func(key string, value interpreter.Value) {
+			func(key string, value interpreter.Value) (resume bool) {
 				r.iterateChildren(append(tr, key), addr, value)
-			})
+
+				// continue iteration
+				return true
+			},
+			interpreter.EmptyLocationRange,
+		)
 	}
 }

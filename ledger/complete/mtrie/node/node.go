@@ -211,18 +211,18 @@ func (n *Node) Path() *ledger.Path {
 	return nil
 }
 
-// Payload returns the the Node's payload.
+// Payload returns the Node's payload.
 // Do NOT MODIFY returned slices!
 func (n *Node) Payload() *ledger.Payload {
 	return n.payload
 }
 
-// LeftChild returns the the Node's left child.
+// LeftChild returns the Node's left child.
 // Only INTERIM nodes have children.
 // Do NOT MODIFY returned Node!
 func (n *Node) LeftChild() *Node { return n.lChild }
 
-// RightChild returns the the Node's right child.
+// RightChild returns the Node's right child.
 // Only INTERIM nodes have children.
 // Do NOT MODIFY returned Node!
 func (n *Node) RightChild() *Node { return n.rChild }
@@ -253,18 +253,18 @@ func (n *Node) FmtStr(prefix string, subpath string) string {
 }
 
 // AllPayloads returns the payload of this node and all payloads of the subtrie
-func (n *Node) AllPayloads() []ledger.Payload {
-	return n.appendSubtreePayloads([]ledger.Payload{})
+func (n *Node) AllPayloads() []*ledger.Payload {
+	return n.appendSubtreePayloads([]*ledger.Payload{})
 }
 
 // appendSubtreePayloads appends the payloads of the subtree with this node as root
 // to the provided Payload slice. Follows same pattern as Go's native append method.
-func (n *Node) appendSubtreePayloads(result []ledger.Payload) []ledger.Payload {
+func (n *Node) appendSubtreePayloads(result []*ledger.Payload) []*ledger.Payload {
 	if n == nil {
 		return result
 	}
 	if n.IsLeaf() {
-		return append(result, *n.Payload())
+		return append(result, n.Payload())
 	}
 	result = n.lChild.appendSubtreePayloads(result)
 	result = n.rChild.appendSubtreePayloads(result)

@@ -23,15 +23,14 @@ func init() {
 	Cmd.Flags().StringVar(&flagDatadir, "datadir", "",
 		"directory that stores the protocol state")
 	_ = Cmd.MarkFlagRequired("datadir")
-
 }
 
 func run(*cobra.Command, []string) {
 
-	log.Info().Msg("Opening database with truncate")
+	log.Info().Msg("Opening protocol database with truncate")
 
 	db := common.InitStorageWithTruncate(flagDatadir, true)
 	defer db.Close()
 
-	log.Info().Msg("Truncated")
+	log.Info().Msg("ProtocolDB Truncated")
 }

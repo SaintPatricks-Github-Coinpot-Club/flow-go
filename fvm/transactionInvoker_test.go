@@ -5,17 +5,15 @@ import (
 	"testing"
 
 	"github.com/onflow/cadence"
+	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/interpreter"
 	"github.com/onflow/cadence/runtime"
-	"github.com/onflow/cadence/runtime/common"
-	"github.com/onflow/cadence/runtime/interpreter"
-	"github.com/onflow/cadence/runtime/sema"
+	"github.com/onflow/cadence/sema"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/flow-go/fvm"
-	"github.com/onflow/flow-go/fvm/programs"
-	"github.com/onflow/flow-go/fvm/state"
-	"github.com/onflow/flow-go/fvm/utils"
+	"github.com/onflow/flow-go/fvm/storage/testutils"
 	"github.com/onflow/flow-go/model/flow"
 )
 
@@ -25,29 +23,21 @@ func TestSafetyCheck(t *testing.T) {
 
 		buffer := &bytes.Buffer{}
 		log := zerolog.New(buffer)
-		txInvoker := fvm.NewTransactionInvoker()
-
 		code := `X`
 
 		proc := fvm.Transaction(&flow.TransactionBody{Script: []byte(code)}, 0)
 
-		view := utils.NewSimpleView()
-		context := fvm.NewContext(fvm.WithLogger(log))
+		context := fvm.NewContext(
+			fvm.WithLogger(log),
+			fvm.WithAuthorizationChecksEnabled(false),
+			fvm.WithSequenceNumberCheckAndIncrementEnabled(false))
 
-		txnState := state.NewTransactionState(
-			view,
-			state.DefaultParameters().
-				WithMaxKeySizeAllowed(context.MaxStateKeySize).
-				WithMaxValueSizeAllowed(context.MaxStateValueSize).
-				WithMaxInteractionSizeAllowed(context.MaxStateInteractionSize),
-		)
+		txnState := testutils.NewSimpleTransaction(nil)
 
-		blockPrograms := programs.NewEmptyBlockPrograms()
-		txnPrograms, err := blockPrograms.NewTransactionPrograms(0, 0)
-		require.NoError(t, err)
-
-		err = txInvoker.Process(context, proc, txnState, txnPrograms)
-		require.Error(t, err)
+		executor := proc.NewExecutor(context, txnState)
+		err := fvm.Run(executor)
+		require.Nil(t, err)
+		require.Error(t, executor.Output().Err)
 
 		require.NotContains(t, buffer.String(), "programs")
 		require.NotContains(t, buffer.String(), "codes")
@@ -58,29 +48,22 @@ func TestSafetyCheck(t *testing.T) {
 
 		buffer := &bytes.Buffer{}
 		log := zerolog.New(buffer)
-		txInvoker := fvm.NewTransactionInvoker()
 
 		code := `transaction(arg: X) { }`
 
 		proc := fvm.Transaction(&flow.TransactionBody{Script: []byte(code)}, 0)
 
-		view := utils.NewSimpleView()
-		context := fvm.NewContext(fvm.WithLogger(log))
+		context := fvm.NewContext(
+			fvm.WithLogger(log),
+			fvm.WithAuthorizationChecksEnabled(false),
+			fvm.WithSequenceNumberCheckAndIncrementEnabled(false))
 
-		txnState := state.NewTransactionState(
-			view,
-			state.DefaultParameters().
-				WithMaxKeySizeAllowed(context.MaxStateKeySize).
-				WithMaxValueSizeAllowed(context.MaxStateValueSize).
-				WithMaxInteractionSizeAllowed(context.MaxStateInteractionSize),
-		)
+		txnState := testutils.NewSimpleTransaction(nil)
 
-		blockPrograms := programs.NewEmptyBlockPrograms()
-		txnPrograms, err := blockPrograms.NewTransactionPrograms(0, 0)
-		require.NoError(t, err)
-
-		err = txInvoker.Process(context, proc, txnState, txnPrograms)
-		require.Error(t, err)
+		executor := proc.NewExecutor(context, txnState)
+		err := fvm.Run(executor)
+		require.Nil(t, err)
+		require.Error(t, executor.Output().Err)
 
 		require.NotContains(t, buffer.String(), "programs")
 		require.NotContains(t, buffer.String(), "codes")
@@ -89,6 +72,12 @@ func TestSafetyCheck(t *testing.T) {
 
 type ErrorReturningRuntime struct {
 	TxErrors []error
+}
+
+var _ runtime.Runtime = &ErrorReturningRuntime{}
+
+func (e *ErrorReturningRuntime) Config() runtime.Config {
+	panic("Config not expected")
 }
 
 func (e *ErrorReturningRuntime) NewScriptExecutor(script runtime.Script, context runtime.Context) runtime.Executor {
@@ -110,8 +99,6 @@ func (e *ErrorReturningRuntime) SetInvalidatedResourceValidationEnabled(_ bool) 
 func (e *ErrorReturningRuntime) SetResourceOwnerChangeHandlerEnabled(_ bool) {
 	panic("SetResourceOwnerChangeHandlerEnabled not expected")
 }
-
-var _ runtime.Runtime = &ErrorReturningRuntime{}
 
 func (e *ErrorReturningRuntime) ExecuteTransaction(_ runtime.Script, _ runtime.Context) error {
 	if len(e.TxErrors) == 0 {
@@ -145,10 +132,6 @@ func (*ErrorReturningRuntime) SetAtreeValidationEnabled(_ bool) {
 
 func (e *ErrorReturningRuntime) ReadStored(_ common.Address, _ cadence.Path, _ runtime.Context) (cadence.Value, error) {
 	return nil, nil
-}
-
-func (e *ErrorReturningRuntime) ReadLinked(_ common.Address, _ cadence.Path, _ runtime.Context) (cadence.Value, error) {
-	panic("ReadLinked not expected")
 }
 
 func (e *ErrorReturningRuntime) InvokeContractFunction(_ common.AddressLocation, _ string, _ []cadence.Value, _ []sema.Type, _ runtime.Context) (cadence.Value, error) {

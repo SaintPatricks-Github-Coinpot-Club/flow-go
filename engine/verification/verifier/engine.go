@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/onflow/crypto"
+	"github.com/onflow/crypto/hash"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/onflow/flow-go/crypto"
-	"github.com/onflow/flow-go/crypto/hash"
 	"github.com/onflow/flow-go/engine"
 	"github.com/onflow/flow-go/engine/verification/utils"
 	chmodels "github.com/onflow/flow-go/model/chunks"
@@ -50,7 +50,7 @@ func New(
 	log zerolog.Logger,
 	metrics module.VerificationMetrics,
 	tracer module.Tracer,
-	net network.Network,
+	net network.EngineRegistry,
 	state protocol.State,
 	me module.Local,
 	chVerif module.ChunkVerifier,
@@ -163,66 +163,103 @@ func (e *Engine) process(originID flow.Identifier, event interface{}) error {
 func (e *Engine) verify(ctx context.Context, originID flow.Identifier,
 	vc *verification.VerifiableChunkData) error {
 	// log it first
-	log := e.log.With().Timestamp().
-		Hex("origin", logging.ID(originID)).
+	log := e.log.With().
 		Uint64("chunk_index", vc.Chunk.Index).
 		Hex("result_id", logging.Entity(vc.Result)).
+		Uint64("block_height", vc.Header.Height).
+		Hex("block_id", vc.Chunk.ChunkBody.BlockID[:]).
 		Logger()
 
 	log.Info().Msg("verifiable chunk received by verifier engine")
 
 	// only accept internal calls
 	if originID != e.me.NodeID() {
-		return fmt.Errorf("invalid remote origin for verify")
+		return fmt.Errorf("invalid remote origin for verify: %v", originID)
 	}
-
-	var err error
 
 	// extracts chunk ID
 	ch, ok := vc.Result.Chunks.ByIndex(vc.Chunk.Index)
 	if !ok {
 		return engine.NewInvalidInputErrorf("chunk out of range requested: %v", vc.Chunk.Index)
 	}
-	log.With().Hex("chunk_id", logging.Entity(ch)).Logger()
+	log = log.With().
+		Hex("chunk_id", logging.Entity(ch)).
+		Logger()
 
 	// execute the assigned chunk
 	span, _ := e.tracer.StartSpanFromContext(ctx, trace.VERVerChunkVerify)
 
-	var spockSecret []byte
-	var chFault chmodels.ChunkFault
-	if vc.IsSystemChunk {
-		spockSecret, chFault, err = e.chVerif.SystemChunkVerify(vc)
-	} else {
-		spockSecret, chFault, err = e.chVerif.Verify(vc)
-	}
+	spockSecret, err := e.chVerif.Verify(vc)
 	span.End()
-	// Any err means that something went wrong when verify the chunk
-	// the outcome of the verification is captured inside the chFault and not the err
-	if err != nil {
-		return fmt.Errorf("cannot verify chunk: %w", err)
-	}
 
-	// if any fault found with the chunk
-	if chFault != nil {
-		switch chFault.(type) {
+	if err != nil {
+		// any error besides a ChunkFaultError is a system error
+		if !chmodels.IsChunkFaultError(err) {
+			return fmt.Errorf("cannot verify chunk: %w", err)
+		}
+
+		// if any fault found with the chunk
+		switch chFault := err.(type) {
 		case *chmodels.CFMissingRegisterTouch:
-			e.log.Warn().Msg(chFault.String())
+			log.Warn().
+				Str("chunk_fault_type", "missing_register_touch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
 			// still create approvals for this case
 		case *chmodels.CFNonMatchingFinalState:
 			// TODO raise challenge
-			e.log.Warn().Msg(chFault.String())
+			log.Warn().
+				Str("chunk_fault_type", "final_state_mismatch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
 			return nil
 		case *chmodels.CFInvalidVerifiableChunk:
 			// TODO raise challenge
-			e.log.Error().Msg(chFault.String())
+			log.Error().
+				Str("chunk_fault_type", "invalid_verifiable_chunk").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
 			return nil
 		case *chmodels.CFInvalidEventsCollection:
 			// TODO raise challenge
-			e.log.Error().Msg(chFault.String())
+			log.Error().
+				Str("chunk_fault_type", "invalid_event_collection").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
+			return nil
+		case *chmodels.CFSystemChunkIncludedCollection:
+			log.Error().
+				Str("chunk_fault_type", "system_chunk_includes_collection").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
+			return nil
+		case *chmodels.CFExecutionDataBlockIDMismatch:
+			log.Error().
+				Str("chunk_fault_type", "execution_data_block_id_mismatch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
+			return nil
+		case *chmodels.CFExecutionDataChunksLengthMismatch:
+			log.Error().
+				Str("chunk_fault_type", "execution_data_chunks_count_mismatch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
+			return nil
+		case *chmodels.CFExecutionDataInvalidChunkCID:
+			log.Error().
+				Str("chunk_fault_type", "execution_data_chunk_cid_mismatch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
+			return nil
+		case *chmodels.CFInvalidExecutionDataID:
+			log.Error().
+				Str("chunk_fault_type", "execution_data_root_cid_mismatch").
+				Str("chunk_fault", chFault.Error()).
+				Msg("chunk fault found, could not verify chunk")
 			return nil
 		default:
 			return engine.NewInvalidInputErrorf("unknown type of chunk fault is received (type: %T) : %v",
-				chFault, chFault.String())
+				chFault, chFault.Error())
 		}
 	}
 
@@ -258,7 +295,7 @@ func (e *Engine) verify(ctx context.Context, originID flow.Identifier,
 	// Extracting consensus node ids
 	// TODO state extraction should be done based on block references
 	consensusNodes, err := e.state.Final().
-		Identities(filter.HasRole(flow.RoleConsensus))
+		Identities(filter.HasRole[flow.Identity](flow.RoleConsensus))
 	if err != nil {
 		// TODO this error needs more advance handling after MVP
 		return fmt.Errorf("could not load consensus node IDs: %w", err)
@@ -323,14 +360,12 @@ func GenerateResultApproval(
 // verifiableChunkHandler acts as a wrapper around the verify method that captures its performance-related metrics
 func (e *Engine) verifiableChunkHandler(originID flow.Identifier, ch *verification.VerifiableChunkData) error {
 
-	span, ctx, isSampled := e.tracer.StartBlockSpan(context.Background(), ch.Chunk.BlockID, trace.VERVerVerifyWithMetrics)
-	if isSampled {
-		span.SetAttributes(
-			attribute.Int64("chunk_index", int64(ch.Chunk.Index)),
-			attribute.String("result_id", ch.Result.ID().String()),
-			attribute.String("origin_id", originID.String()),
-		)
-	}
+	span, ctx := e.tracer.StartBlockSpan(context.Background(), ch.Chunk.BlockID, trace.VERVerVerifyWithMetrics)
+	span.SetAttributes(
+		attribute.Int64("chunk_index", int64(ch.Chunk.Index)),
+		attribute.String("result_id", ch.Result.ID().String()),
+		attribute.String("origin_id", originID.String()),
+	)
 	defer span.End()
 
 	// increments number of received verifiable chunks

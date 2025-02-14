@@ -1,25 +1,32 @@
 package unittest
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"fmt"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
-	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/onflow/cadence"
+	"github.com/onflow/crypto"
+	"github.com/onflow/crypto/hash"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onflow/cadence"
-
 	sdk "github.com/onflow/flow-go-sdk"
+
 	hotstuff "github.com/onflow/flow-go/consensus/hotstuff/model"
-	"github.com/onflow/flow-go/crypto"
-	"github.com/onflow/flow-go/crypto/hash"
-	"github.com/onflow/flow-go/engine/execution/state/delta"
+	"github.com/onflow/flow-go/engine"
+	"github.com/onflow/flow-go/engine/access/rest/util"
+	"github.com/onflow/flow-go/fvm/storage/snapshot"
+	"github.com/onflow/flow-go/ledger"
 	"github.com/onflow/flow-go/ledger/common/bitutils"
+	"github.com/onflow/flow-go/ledger/common/testutils"
 	"github.com/onflow/flow-go/model/bootstrap"
 	"github.com/onflow/flow-go/model/chainsync"
 	"github.com/onflow/flow-go/model/chunks"
@@ -27,34 +34,63 @@ import (
 	"github.com/onflow/flow-go/model/encoding"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/model/flow/filter"
-	"github.com/onflow/flow-go/model/flow/order"
+	"github.com/onflow/flow-go/model/flow/mapfunc"
 	"github.com/onflow/flow-go/model/messages"
 	"github.com/onflow/flow-go/model/verification"
 	"github.com/onflow/flow-go/module"
+	"github.com/onflow/flow-go/module/executiondatasync/execution_data"
 	"github.com/onflow/flow-go/module/mempool/entity"
+	"github.com/onflow/flow-go/module/signature"
 	"github.com/onflow/flow-go/module/updatable_configs"
+	"github.com/onflow/flow-go/network/channels"
+	"github.com/onflow/flow-go/network/message"
+	p2pconfig "github.com/onflow/flow-go/network/p2p/config"
 	"github.com/onflow/flow-go/network/p2p/keyutils"
 	"github.com/onflow/flow-go/state/protocol"
 	"github.com/onflow/flow-go/state/protocol/inmem"
+	"github.com/onflow/flow-go/state/protocol/protocol_state/kvstore"
 	"github.com/onflow/flow-go/utils/dsl"
 )
 
 const (
 	DefaultSeedFixtureLength = 64
+	DefaultAddress           = "localhost:0"
 )
+
+// returns a deterministic math/rand PRG that can be used for deterministic randomness in tests only.
+// The PRG seed is logged in case the test iteration needs to be reproduced.
+func GetPRG(t *testing.T) *rand.Rand {
+	random := time.Now().UnixNano()
+	t.Logf("rng seed is %d", random)
+	rng := rand.New(rand.NewSource(random))
+	return rng
+}
+
+func IPPort(port string) string {
+	return net.JoinHostPort("localhost", port)
+}
 
 func AddressFixture() flow.Address {
 	return flow.Testnet.Chain().ServiceAddress()
 }
 
 func RandomAddressFixture() flow.Address {
+	return RandomAddressFixtureForChain(flow.Testnet)
+}
+
+func RandomAddressFixtureForChain(chainID flow.ChainID) flow.Address {
 	// we use a 32-bit index - since the linear address generator uses 45 bits,
 	// this won't error
-	addr, err := flow.Testnet.Chain().AddressAtIndex(uint64(rand.Uint32()))
+	addr, err := chainID.Chain().AddressAtIndex(uint64(rand.Uint32()))
 	if err != nil {
 		panic(err)
 	}
 	return addr
+}
+
+// Uint64InRange returns a uint64 value drawn from the uniform random distribution [min,max].
+func Uint64InRange(min, max uint64) uint64 {
+	return min + uint64(rand.Intn(int(max)+1-int(min)))
 }
 
 func RandomSDKAddressFixture() sdk.Address {
@@ -108,7 +144,7 @@ func ProposalKeyFixture() flow.ProposalKey {
 
 // AccountKeyDefaultFixture returns a randomly generated ECDSA/SHA3 account key.
 func AccountKeyDefaultFixture() (*flow.AccountPrivateKey, error) {
-	return AccountKeyFixture(crypto.KeyGenSeedMinLenECDSAP256, crypto.ECDSAP256, hash.SHA3_256)
+	return AccountKeyFixture(crypto.KeyGenSeedMinLen, crypto.ECDSAP256, hash.SHA3_256)
 }
 
 // AccountKeyFixture returns a randomly generated account key.
@@ -160,6 +196,35 @@ func BlockFixture() flow.Block {
 	return *BlockWithParentFixture(header)
 }
 
+func ChainBlockFixture(n int) []*flow.Block {
+	root := BlockHeaderFixture()
+	return ChainBlockFixtureWithRoot(root, n)
+}
+
+func ChainBlockFixtureWithRoot(root *flow.Header, n int) []*flow.Block {
+	bs := make([]*flow.Block, 0, n)
+	parent := root
+	for i := 0; i < n; i++ {
+		b := BlockWithParentFixture(parent)
+		bs = append(bs, b)
+		parent = b.Header
+	}
+	return bs
+}
+
+func RechainBlocks(blocks []*flow.Block) {
+	if len(blocks) == 0 {
+		return
+	}
+
+	parent := blocks[0]
+
+	for _, block := range blocks[1:] {
+		block.Header.ParentID = parent.ID()
+		parent = block
+	}
+}
+
 func FullBlockFixture() flow.Block {
 	block := BlockFixture()
 	payload := block.Payload
@@ -172,6 +237,7 @@ func FullBlockFixture() flow.Block {
 		ExecutionReceiptFixture(WithResult(payload.Results[0])).Meta(),
 		ExecutionReceiptFixture(WithResult(payload.Results[1])).Meta(),
 	}
+	payload.ProtocolStateID = IdentifierFixture()
 
 	header := block.Header
 	header.PayloadHash = payload.Hash()
@@ -197,42 +263,38 @@ func ProposalFixture() *messages.BlockProposal {
 }
 
 func ProposalFromBlock(block *flow.Block) *messages.BlockProposal {
-	proposal := &messages.BlockProposal{
-		Header:  block.Header,
-		Payload: block.Payload,
-	}
-	return proposal
+	return messages.NewBlockProposal(block)
 }
 
 func ClusterProposalFromBlock(block *cluster.Block) *messages.ClusterBlockProposal {
-	proposal := &messages.ClusterBlockProposal{
-		Header:  block.Header,
-		Payload: block.Payload,
-	}
-	return proposal
+	return messages.NewClusterBlockProposal(block)
 }
 
-func PendingFromBlock(block *flow.Block) *flow.PendingBlock {
-	pending := flow.PendingBlock{
-		OriginID: block.Header.ProposerID,
-		Header:   block.Header,
-		Payload:  block.Payload,
+func BlockchainFixture(length int) []*flow.Block {
+	blocks := make([]*flow.Block, length)
+
+	genesis := BlockFixture()
+	blocks[0] = &genesis
+	for i := 1; i < length; i++ {
+		blocks[i] = BlockWithParentFixture(blocks[i-1].Header)
 	}
-	return &pending
+
+	return blocks
 }
 
-func StateDeltaFixture() *messages.ExecutionStateDelta {
-	header := BlockHeaderFixture()
-	block := BlockWithParentFixture(header)
-	return &messages.ExecutionStateDelta{
-		ExecutableBlock: entity.ExecutableBlock{
-			Block: block,
-		},
+// AsSlashable returns the input message T, wrapped as a flow.Slashable instance with a random origin ID.
+func AsSlashable[T any](msg T) flow.Slashable[T] {
+	slashable := flow.Slashable[T]{
+		OriginID: IdentifierFixture(),
+		Message:  msg,
 	}
+	return slashable
 }
 
-func ReceiptAndSealForBlock(block *flow.Block) (*flow.ExecutionReceipt, *flow.Seal) {
+// ReceiptAndSealForBlock returns a receipt with service events and a seal for them for a given block.
+func ReceiptAndSealForBlock(block *flow.Block, serviceEvents ...flow.ServiceEvent) (*flow.ExecutionReceipt, *flow.Seal) {
 	receipt := ReceiptForBlockFixture(block)
+	receipt.ExecutionResult.ServiceEvents = serviceEvents
 	seal := Seal.Fixture(Seal.WithBlock(block.Header), Seal.WithResult(&receipt.ExecutionResult))
 	return receipt, seal
 }
@@ -253,10 +315,14 @@ func WithAllTheFixins(payload *flow.Payload) {
 	payload.Seals = Seal.Fixtures(3)
 	payload.Guarantees = CollectionGuaranteesFixture(4)
 	for i := 0; i < 10; i++ {
-		receipt := ExecutionReceiptFixture()
+		receipt := ExecutionReceiptFixture(
+			WithResult(ExecutionResultFixture(WithServiceEvents(3))),
+			WithSpocks(SignaturesFixture(3)),
+		)
 		payload.Receipts = flow.ExecutionReceiptMetaList{receipt.Meta()}
 		payload.Results = flow.ExecutionResultList{&receipt.ExecutionResult}
 	}
+	payload.ProtocolStateID = IdentifierFixture()
 }
 
 func WithSeals(seals ...*flow.Seal) func(*flow.Payload) {
@@ -277,6 +343,12 @@ func WithReceipts(receipts ...*flow.ExecutionReceipt) func(*flow.Payload) {
 			payload.Receipts = append(payload.Receipts, receipt.Meta())
 			payload.Results = append(payload.Results, &receipt.ExecutionResult)
 		}
+	}
+}
+
+func WithProtocolStateID(stateID flow.Identifier) func(payload *flow.Payload) {
+	return func(payload *flow.Payload) {
+		payload.ProtocolStateID = stateID
 	}
 }
 
@@ -308,6 +380,16 @@ func BlockWithParentFixture(parent *flow.Header) *flow.Block {
 	}
 }
 
+func BlockWithParentProtocolState(parent *flow.Block) *flow.Block {
+	payload := PayloadFixture(WithProtocolStateID(parent.Payload.ProtocolStateID))
+	header := BlockHeaderWithParentFixture(parent.Header)
+	header.PayloadHash = payload.Hash()
+	return &flow.Block{
+		Header:  header,
+		Payload: &payload,
+	}
+}
+
 func BlockWithGuaranteesFixture(guarantees []*flow.CollectionGuarantee) *flow.Block {
 	payload := PayloadFixture(WithGuarantees(guarantees...))
 	header := BlockHeaderFixture()
@@ -323,17 +405,27 @@ func WithoutGuarantee(payload *flow.Payload) {
 	payload.Guarantees = nil
 }
 
-func StateInteractionsFixture() *delta.Snapshot {
-	return &delta.NewView(nil).Interactions().Snapshot
+func StateInteractionsFixture() *snapshot.ExecutionSnapshot {
+	return &snapshot.ExecutionSnapshot{}
 }
 
-func BlockWithParentAndProposerFixture(parent *flow.Header, proposer flow.Identifier, participantCount int) flow.Block {
+func BlockWithParentAndProposerFixture(
+	t *testing.T,
+	parent *flow.Header,
+	proposer flow.Identifier,
+) flow.Block {
 	block := BlockWithParentFixture(parent)
 
+	indices, err := signature.EncodeSignersToIndices(
+		[]flow.Identifier{proposer}, []flow.Identifier{proposer})
+	require.NoError(t, err)
+
 	block.Header.ProposerID = proposer
-	indices := bitutils.MakeBitVector(10)
-	bitutils.SetBit(indices, 1)
 	block.Header.ParentVoterIndices = indices
+	if block.Header.LastViewTC != nil {
+		block.Header.LastViewTC.SignerIndices = indices
+		block.Header.LastViewTC.NewestQC.SignerIndices = indices
+	}
 
 	return *block
 }
@@ -355,26 +447,6 @@ func BlockWithParentAndSeals(parent *flow.Header, seals []*flow.Header) *flow.Bl
 
 	block.SetPayload(payload)
 	return block
-}
-
-func StateDeltaWithParentFixture(parent *flow.Header) *messages.ExecutionStateDelta {
-	payload := PayloadFixture()
-	header := BlockHeaderWithParentFixture(parent)
-	header.PayloadHash = payload.Hash()
-	block := flow.Block{
-		Header:  header,
-		Payload: &payload,
-	}
-
-	var stateInteractions []*delta.Snapshot
-	stateInteractions = append(stateInteractions, StateInteractionsFixture())
-
-	return &messages.ExecutionStateDelta{
-		ExecutableBlock: entity.ExecutableBlock{
-			Block: &block,
-		},
-		StateInteractions: stateInteractions,
-	}
 }
 
 func GenesisFixture() *flow.Block {
@@ -411,13 +483,10 @@ func BlockHeaderFixture(opts ...func(header *flow.Header)) *flow.Header {
 	return header
 }
 
-func CidFixture() cid.Cid {
-	data := make([]byte, 1024)
-	rand.Read(data)
-	return blocks.NewBlock(data).Cid()
-}
-
-func BlockHeaderFixtureOnChain(chainID flow.ChainID, opts ...func(header *flow.Header)) *flow.Header {
+func BlockHeaderFixtureOnChain(
+	chainID flow.ChainID,
+	opts ...func(header *flow.Header),
+) *flow.Header {
 	height := 1 + uint64(rand.Uint32()) // avoiding edge case of height = 0 (genesis block)
 	view := height + uint64(rand.Intn(1000))
 	header := BlockHeaderWithParentFixture(&flow.Header{
@@ -437,6 +506,19 @@ func BlockHeaderFixtureOnChain(chainID flow.ChainID, opts ...func(header *flow.H
 func BlockHeaderWithParentFixture(parent *flow.Header) *flow.Header {
 	height := parent.Height + 1
 	view := parent.View + 1 + uint64(rand.Intn(10)) // Intn returns [0, n)
+	var lastViewTC *flow.TimeoutCertificate
+	if view != parent.View+1 {
+		newestQC := QuorumCertificateFixture(func(qc *flow.QuorumCertificate) {
+			qc.View = parent.View
+		})
+		lastViewTC = &flow.TimeoutCertificate{
+			View:          view - 1,
+			NewestQCViews: []uint64{newestQC.View},
+			NewestQC:      newestQC,
+			SignerIndices: SignerIndicesFixture(4),
+			SigData:       SignatureFixture(),
+		}
+	}
 	return &flow.Header{
 		ChainID:            parent.ChainID,
 		ParentID:           parent.ID(),
@@ -444,10 +526,48 @@ func BlockHeaderWithParentFixture(parent *flow.Header) *flow.Header {
 		PayloadHash:        IdentifierFixture(),
 		Timestamp:          time.Now().UTC(),
 		View:               view,
+		ParentView:         parent.View,
 		ParentVoterIndices: SignerIndicesFixture(4),
 		ParentVoterSigData: QCSigDataFixture(),
 		ProposerID:         IdentifierFixture(),
 		ProposerSigData:    SignatureFixture(),
+		LastViewTC:         lastViewTC,
+	}
+}
+
+func BlockHeaderWithHeight(height uint64) *flow.Header {
+	return BlockHeaderFixture(WithHeaderHeight(height))
+}
+
+func BlockHeaderWithParentWithSoRFixture(parent *flow.Header, source []byte) *flow.Header {
+	height := parent.Height + 1
+	view := parent.View + 1 + uint64(rand.Intn(10)) // Intn returns [0, n)
+	var lastViewTC *flow.TimeoutCertificate
+	if view != parent.View+1 {
+		newestQC := QuorumCertificateFixture(func(qc *flow.QuorumCertificate) {
+			qc.View = parent.View
+		})
+		lastViewTC = &flow.TimeoutCertificate{
+			View:          view - 1,
+			NewestQCViews: []uint64{newestQC.View},
+			NewestQC:      newestQC,
+			SignerIndices: SignerIndicesFixture(4),
+			SigData:       SignatureFixture(),
+		}
+	}
+	return &flow.Header{
+		ChainID:            parent.ChainID,
+		ParentID:           parent.ID(),
+		Height:             height,
+		PayloadHash:        IdentifierFixture(),
+		Timestamp:          time.Now().UTC(),
+		View:               view,
+		ParentView:         parent.View,
+		ParentVoterIndices: SignerIndicesFixture(4),
+		ParentVoterSigData: QCSigDataWithSoRFixture(source),
+		ProposerID:         IdentifierFixture(),
+		ProposerSigData:    SignatureFixture(),
+		LastViewTC:         lastViewTC,
 	}
 }
 
@@ -473,6 +593,20 @@ func ClusterBlockFixture() cluster.Block {
 	}
 }
 
+func ClusterBlockChainFixture(n int) []cluster.Block {
+	clusterBlocks := make([]cluster.Block, 0, n)
+
+	parent := ClusterBlockFixture()
+
+	for i := 0; i < n; i++ {
+		block := ClusterBlockWithParent(&parent)
+		clusterBlocks = append(clusterBlocks, block)
+		parent = block
+	}
+
+	return clusterBlocks
+}
+
 // ClusterBlockWithParent creates a new cluster consensus block that is valid
 // with respect to the given parent block.
 func ClusterBlockWithParent(parent *cluster.Block) cluster.Block {
@@ -485,6 +619,7 @@ func ClusterBlockWithParent(parent *cluster.Block) cluster.Block {
 	header.ChainID = parent.Header.ChainID
 	header.Timestamp = time.Now()
 	header.ParentID = parent.ID()
+	header.ParentView = parent.Header.View
 	header.PayloadHash = payload.Hash()
 
 	block := cluster.Block{
@@ -505,6 +640,17 @@ func WithCollection(collection *flow.Collection) func(guarantee *flow.Collection
 	return func(guarantee *flow.CollectionGuarantee) {
 		guarantee.CollectionID = collection.ID()
 	}
+}
+
+func AddCollectionsToBlock(block *flow.Block, collections []*flow.Collection) {
+	gs := make([]*flow.CollectionGuarantee, 0, len(collections))
+	for _, collection := range collections {
+		g := collection.Guarantee()
+		gs = append(gs, &g)
+	}
+
+	block.Payload.Guarantees = gs
+	block.SetPayload(*block.Payload)
 }
 
 func CollectionGuaranteeFixture(options ...func(*flow.CollectionGuarantee)) *flow.CollectionGuarantee {
@@ -528,7 +674,10 @@ func CollectionGuaranteesWithCollectionIDFixture(collections []*flow.Collection)
 	return guarantees
 }
 
-func CollectionGuaranteesFixture(n int, options ...func(*flow.CollectionGuarantee)) []*flow.CollectionGuarantee {
+func CollectionGuaranteesFixture(
+	n int,
+	options ...func(*flow.CollectionGuarantee),
+) []*flow.CollectionGuarantee {
 	guarantees := make([]*flow.CollectionGuarantee, 0, n)
 	for i := 1; i <= n; i++ {
 		guarantee := CollectionGuaranteeFixture(options...)
@@ -602,13 +751,20 @@ func CompleteCollectionFromTransactions(txs []*flow.TransactionBody) *entity.Com
 	}
 }
 
-func ExecutableBlockFixture(collectionsSignerIDs [][]flow.Identifier) *entity.ExecutableBlock {
+func ExecutableBlockFixture(
+	collectionsSignerIDs [][]flow.Identifier,
+	startState *flow.StateCommitment,
+) *entity.ExecutableBlock {
 
 	header := BlockHeaderFixture()
-	return ExecutableBlockFixtureWithParent(collectionsSignerIDs, header)
+	return ExecutableBlockFixtureWithParent(collectionsSignerIDs, header, startState)
 }
 
-func ExecutableBlockFixtureWithParent(collectionsSignerIDs [][]flow.Identifier, parent *flow.Header) *entity.ExecutableBlock {
+func ExecutableBlockFixtureWithParent(
+	collectionsSignerIDs [][]flow.Identifier,
+	parent *flow.Header,
+	startState *flow.StateCommitment,
+) *entity.ExecutableBlock {
 
 	completeCollections := make(map[flow.Identifier]*entity.CompleteCollection, len(collectionsSignerIDs))
 	block := BlockWithParentFixture(parent)
@@ -625,11 +781,15 @@ func ExecutableBlockFixtureWithParent(collectionsSignerIDs [][]flow.Identifier, 
 	executableBlock := &entity.ExecutableBlock{
 		Block:               block,
 		CompleteCollections: completeCollections,
+		StartState:          startState,
 	}
 	return executableBlock
 }
 
-func ExecutableBlockFromTransactions(chain flow.ChainID, txss [][]*flow.TransactionBody) *entity.ExecutableBlock {
+func ExecutableBlockFromTransactions(
+	chain flow.ChainID,
+	txss [][]*flow.TransactionBody,
+) *entity.ExecutableBlock {
 
 	completeCollections := make(map[flow.Identifier]*entity.CompleteCollection, len(txss))
 	blockHeader := BlockHeaderFixtureOnChain(chain)
@@ -665,6 +825,12 @@ func WithResult(result *flow.ExecutionResult) func(*flow.ExecutionReceipt) {
 	}
 }
 
+func WithSpocks(spocks []crypto.Signature) func(*flow.ExecutionReceipt) {
+	return func(receipt *flow.ExecutionReceipt) {
+		receipt.Spocks = spocks
+	}
+}
+
 func ExecutionReceiptFixture(opts ...func(*flow.ExecutionReceipt)) *flow.ExecutionReceipt {
 	receipt := &flow.ExecutionReceipt{
 		ExecutorID:        IdentifierFixture(),
@@ -684,13 +850,19 @@ func ReceiptForBlockFixture(block *flow.Block) *flow.ExecutionReceipt {
 	return ReceiptForBlockExecutorFixture(block, IdentifierFixture())
 }
 
-func ReceiptForBlockExecutorFixture(block *flow.Block, executor flow.Identifier) *flow.ExecutionReceipt {
+func ReceiptForBlockExecutorFixture(
+	block *flow.Block,
+	executor flow.Identifier,
+) *flow.ExecutionReceipt {
 	result := ExecutionResultFixture(WithBlock(block))
 	receipt := ExecutionReceiptFixture(WithResult(result), WithExecutorID(executor))
 	return receipt
 }
 
-func ReceiptsForBlockFixture(block *flow.Block, ids []flow.Identifier) []*flow.ExecutionReceipt {
+func ReceiptsForBlockFixture(
+	block *flow.Block,
+	ids []flow.Identifier,
+) []*flow.ExecutionReceipt {
 	result := ExecutionResultFixture(WithBlock(block))
 	var ers []*flow.ExecutionReceipt
 	for _, id := range ids {
@@ -721,19 +893,21 @@ func WithBlock(block *flow.Block) func(*flow.ExecutionResult) {
 	return func(result *flow.ExecutionResult) {
 		startState := result.Chunks[0].StartState // retain previous start state in case it was user-defined
 		result.BlockID = blockID
-		result.Chunks = ChunkListFixture(uint(chunks), blockID)
-		result.Chunks[0].StartState = startState // set start state to value before update
+		result.Chunks = ChunkListFixture(uint(chunks), blockID, startState)
 		result.PreviousResultID = previousResultID
 	}
 }
 
 func WithChunks(n uint) func(*flow.ExecutionResult) {
 	return func(result *flow.ExecutionResult) {
-		result.Chunks = ChunkListFixture(n, result.BlockID)
+		result.Chunks = ChunkListFixture(n, result.BlockID, StateCommitmentFixture())
 	}
 }
 
-func ExecutionResultListFixture(n int, opts ...func(*flow.ExecutionResult)) []*flow.ExecutionResult {
+func ExecutionResultListFixture(
+	n int,
+	opts ...func(*flow.ExecutionResult),
+) []*flow.ExecutionResult {
 	results := make([]*flow.ExecutionResult, 0, n)
 	for i := 0; i < n; i++ {
 		results = append(results, ExecutionResultFixture(opts...))
@@ -748,6 +922,12 @@ func WithExecutionResultBlockID(blockID flow.Identifier) func(*flow.ExecutionRes
 		for _, chunk := range result.Chunks {
 			chunk.BlockID = blockID
 		}
+	}
+}
+
+func WithFinalState(commit flow.StateCommitment) func(*flow.ExecutionResult) {
+	return func(result *flow.ExecutionResult) {
+		result.Chunks[len(result.Chunks)-1].EndState = commit
 	}
 }
 
@@ -766,12 +946,14 @@ func WithExecutionDataID(id flow.Identifier) func(result *flow.ExecutionResult) 
 func ServiceEventsFixture(n int) flow.ServiceEventList {
 	sel := make(flow.ServiceEventList, n)
 
-	for ; n > 0; n-- {
-		switch rand.Intn(2) {
+	for i := 0; i < n; i++ {
+		switch i % 3 {
 		case 0:
-			sel[n-1] = EpochCommitFixture().ServiceEvent()
+			sel[i] = EpochCommitFixture().ServiceEvent()
 		case 1:
-			sel[n-1] = EpochSetupFixture().ServiceEvent()
+			sel[i] = EpochSetupFixture().ServiceEvent()
+		case 2:
+			sel[i] = VersionBeaconFixture().ServiceEvent()
 		}
 	}
 
@@ -779,11 +961,11 @@ func ServiceEventsFixture(n int) flow.ServiceEventList {
 }
 
 func ExecutionResultFixture(opts ...func(*flow.ExecutionResult)) *flow.ExecutionResult {
-	blockID := IdentifierFixture()
+	executedBlockID := IdentifierFixture()
 	result := &flow.ExecutionResult{
 		PreviousResultID: IdentifierFixture(),
-		BlockID:          IdentifierFixture(),
-		Chunks:           ChunkListFixture(2, blockID),
+		BlockID:          executedBlockID,
+		Chunks:           ChunkListFixture(2, executedBlockID, StateCommitmentFixture()),
 		ExecutionDataID:  IdentifierFixture(),
 	}
 
@@ -875,7 +1057,7 @@ func HashFixture(size int) hash.Hash {
 	return hash
 }
 
-func IdentifierListFixture(n int) []flow.Identifier {
+func IdentifierListFixture(n int) flow.IdentifierList {
 	list := make([]flow.Identifier, n)
 	for i := 0; i < n; i++ {
 		list[i] = IdentifierFixture()
@@ -912,16 +1094,17 @@ func WithRole(role flow.Role) func(*flow.Identity) {
 	}
 }
 
-// WithWeight sets the weight on an identity fixture.
-func WithWeight(weight uint64) func(*flow.Identity) {
+// WithInitialWeight sets the initial weight on an identity fixture.
+func WithInitialWeight(weight uint64) func(*flow.Identity) {
 	return func(identity *flow.Identity) {
-		identity.Weight = weight
+		identity.InitialWeight = weight
 	}
 }
 
-func WithEjected(ejected bool) func(*flow.Identity) {
+// WithParticipationStatus sets the epoch participation status on an identity fixture.
+func WithParticipationStatus(status flow.EpochParticipationStatus) func(*flow.Identity) {
 	return func(identity *flow.Identity) {
-		identity.Ejected = ejected
+		identity.EpochParticipationStatus = status
 	}
 }
 
@@ -956,7 +1139,7 @@ func NodeConfigFixture(opts ...func(*flow.Identity)) bootstrap.NodeConfig {
 	return bootstrap.NodeConfig{
 		Role:    identity.Role,
 		Address: identity.Address,
-		Weight:  identity.Weight,
+		Weight:  identity.InitialWeight,
 	}
 }
 
@@ -975,9 +1158,16 @@ func NodeInfosFixture(n int, opts ...func(*flow.Identity)) []bootstrap.NodeInfo 
 	return nodeInfos
 }
 
+func PrivateNodeInfoFixture(opts ...func(*flow.Identity)) bootstrap.NodeInfo {
+	return PrivateNodeInfosFixture(1, opts...)[0]
+}
+
 func PrivateNodeInfosFixture(n int, opts ...func(*flow.Identity)) []bootstrap.NodeInfo {
-	il := IdentityListFixture(n, opts...)
-	nodeInfos := make([]bootstrap.NodeInfo, 0, n)
+	return PrivateNodeInfosFromIdentityList(IdentityListFixture(n, opts...))
+}
+
+func PrivateNodeInfosFromIdentityList(il flow.IdentityList) []bootstrap.NodeInfo {
+	nodeInfos := make([]bootstrap.NodeInfo, 0, len(il))
 	for _, identity := range il {
 		nodeInfo := bootstrap.PrivateNodeInfoFromIdentity(identity, KeyFixture(crypto.ECDSAP256), KeyFixture(crypto.BLSBLS12381))
 		nodeInfos = append(nodeInfos, nodeInfo)
@@ -990,11 +1180,16 @@ func IdentityFixture(opts ...func(*flow.Identity)) *flow.Identity {
 	nodeID := IdentifierFixture()
 	stakingKey := StakingPrivKeyByIdentifier(nodeID)
 	identity := flow.Identity{
-		NodeID:        nodeID,
-		Address:       fmt.Sprintf("address-%x:0", nodeID[0:7]),
-		Role:          flow.RoleConsensus,
-		Weight:        1000,
-		StakingPubKey: stakingKey.PublicKey(),
+		IdentitySkeleton: flow.IdentitySkeleton{
+			NodeID:        nodeID,
+			Address:       fmt.Sprintf("address-%x", nodeID[0:7]),
+			Role:          flow.RoleConsensus,
+			InitialWeight: 1000,
+			StakingPubKey: stakingKey.PublicKey(),
+		},
+		DynamicIdentity: flow.DynamicIdentity{
+			EpochParticipationStatus: flow.EpochParticipationStatusActive,
+		},
 	}
 	for _, apply := range opts {
 		apply(&identity)
@@ -1003,7 +1198,10 @@ func IdentityFixture(opts ...func(*flow.Identity)) *flow.Identity {
 }
 
 // IdentityWithNetworkingKeyFixture returns a node identity and networking private key
-func IdentityWithNetworkingKeyFixture(opts ...func(*flow.Identity)) (*flow.Identity, crypto.PrivateKey) {
+func IdentityWithNetworkingKeyFixture(opts ...func(*flow.Identity)) (
+	*flow.Identity,
+	crypto.PrivateKey,
+) {
 	networkKey := NetworkingPrivKeyFixture()
 	opts = append(opts, WithNetworkingKey(networkKey.PublicKey()))
 	id := IdentityFixture(opts...)
@@ -1103,17 +1301,33 @@ func IdentityListFixture(n int, opts ...func(*flow.Identity)) flow.IdentityList 
 	return identities
 }
 
+func DynamicIdentityEntryListFixture(n int) flow.DynamicIdentityEntryList {
+	list := make(flow.DynamicIdentityEntryList, n)
+	for i := 0; i < n; i++ {
+		list[i] = &flow.DynamicIdentityEntry{
+			NodeID:  IdentifierFixture(),
+			Ejected: false,
+		}
+	}
+	return list
+}
+
 func WithChunkStartState(startState flow.StateCommitment) func(chunk *flow.Chunk) {
 	return func(chunk *flow.Chunk) {
 		chunk.StartState = startState
 	}
 }
 
-func ChunkFixture(blockID flow.Identifier, collectionIndex uint, opts ...func(*flow.Chunk)) *flow.Chunk {
+func ChunkFixture(
+	blockID flow.Identifier,
+	collectionIndex uint,
+	startState flow.StateCommitment,
+	opts ...func(*flow.Chunk),
+) *flow.Chunk {
 	chunk := &flow.Chunk{
 		ChunkBody: flow.ChunkBody{
 			CollectionIndex:      collectionIndex,
-			StartState:           StateCommitmentFixture(),
+			StartState:           startState,
 			EventCollection:      IdentifierFixture(),
 			TotalComputationUsed: 4200,
 			NumberOfTransactions: 42,
@@ -1130,12 +1344,13 @@ func ChunkFixture(blockID flow.Identifier, collectionIndex uint, opts ...func(*f
 	return chunk
 }
 
-func ChunkListFixture(n uint, blockID flow.Identifier) flow.ChunkList {
+func ChunkListFixture(n uint, blockID flow.Identifier, startState flow.StateCommitment) flow.ChunkList {
 	chunks := make([]*flow.Chunk, 0, n)
 	for i := uint64(0); i < uint64(n); i++ {
-		chunk := ChunkFixture(blockID, uint(i))
+		chunk := ChunkFixture(blockID, uint(i), startState)
 		chunk.Index = i
 		chunks = append(chunks, chunk)
+		startState = chunk.EndState
 	}
 	return chunks
 }
@@ -1171,7 +1386,12 @@ func ChunkStatusListToChunkLocatorFixture(statuses []*verification.ChunkStatus) 
 // ChunkStatusListFixture receives an execution result, samples `n` chunks out of it and
 // creates a chunk status for them.
 // It returns the list of sampled chunk statuses for the result.
-func ChunkStatusListFixture(t *testing.T, blockHeight uint64, result *flow.ExecutionResult, n int) verification.ChunkStatusList {
+func ChunkStatusListFixture(
+	t *testing.T,
+	blockHeight uint64,
+	result *flow.ExecutionResult,
+	n int,
+) verification.ChunkStatusList {
 	statuses := verification.ChunkStatusList{}
 
 	// result should have enough chunk to sample
@@ -1193,8 +1413,7 @@ func ChunkStatusListFixture(t *testing.T, blockHeight uint64, result *flow.Execu
 	return statuses
 }
 
-func QCSigDataFixture() []byte {
-	packer := hotstuff.SigDataPacker{}
+func qcSignatureDataFixture() hotstuff.SignatureData {
 	sigType := RandomBytes(5)
 	for i := range sigType {
 		sigType[i] = sigType[i] % 2
@@ -1205,6 +1424,20 @@ func QCSigDataFixture() []byte {
 		AggregatedRandomBeaconSig:    SignatureFixture(),
 		ReconstructedRandomBeaconSig: SignatureFixture(),
 	}
+	return sigData
+}
+
+func QCSigDataFixture() []byte {
+	packer := hotstuff.SigDataPacker{}
+	sigData := qcSignatureDataFixture()
+	encoded, _ := packer.Encode(&sigData)
+	return encoded
+}
+
+func QCSigDataWithSoRFixture(sor []byte) []byte {
+	packer := hotstuff.SigDataPacker{}
+	sigData := qcSignatureDataFixture()
+	sigData.ReconstructedRandomBeaconSig = sor
 	encoded, _ := packer.Encode(&sigData)
 	return encoded
 }
@@ -1223,6 +1456,14 @@ func SignaturesFixture(n int) []crypto.Signature {
 	return sigs
 }
 
+func RandomSourcesFixture(n int) [][]byte {
+	var sigs [][]byte
+	for i := 0; i < n; i++ {
+		sigs = append(sigs, SignatureFixture())
+	}
+	return sigs
+}
+
 func TransactionFixture(n ...func(t *flow.Transaction)) flow.Transaction {
 	tx := flow.Transaction{TransactionBody: TransactionBodyFixture()}
 	if len(n) > 0 {
@@ -1233,7 +1474,7 @@ func TransactionFixture(n ...func(t *flow.Transaction)) flow.Transaction {
 
 func TransactionBodyFixture(opts ...func(*flow.TransactionBody)) flow.TransactionBody {
 	tb := flow.TransactionBody{
-		Script:             []byte("pub fun main() {}"),
+		Script:             []byte("access(all) fun main() {}"),
 		ReferenceBlockID:   IdentifierFixture(),
 		GasLimit:           10,
 		ProposalKey:        ProposalKeyFixture(),
@@ -1275,10 +1516,15 @@ func TransactionDSLFixture(chain flow.Chain) dsl.Transaction {
 		Import: dsl.Import{Address: sdk.Address(chain.ServiceAddress())},
 		Content: dsl.Prepare{
 			Content: dsl.Code(`
-				pub fun main() {}
+				access(all) fun main() {}
 			`),
 		},
 	}
+}
+
+// RegisterIDFixture returns a RegisterID with a fixed key and owner
+func RegisterIDFixture() flow.RegisterID {
+	return flow.NewRegisterID(RandomAddressFixture(), "key")
 }
 
 // VerifiableChunkDataFixture returns a complete verifiable chunk with an
@@ -1350,7 +1596,10 @@ func VerifiableChunkDataFixture(chunkIndex uint64) *verification.VerifiableChunk
 
 // ChunkDataResponseMsgFixture creates a chunk data response message with a single-transaction collection, and random chunk ID.
 // Use options to customize the response.
-func ChunkDataResponseMsgFixture(chunkID flow.Identifier, opts ...func(*messages.ChunkDataResponse)) *messages.ChunkDataResponse {
+func ChunkDataResponseMsgFixture(
+	chunkID flow.Identifier,
+	opts ...func(*messages.ChunkDataResponse),
+) *messages.ChunkDataResponse {
 	cdp := &messages.ChunkDataResponse{
 		ChunkDataPack: *ChunkDataPackFixture(chunkID),
 		Nonce:         rand.Uint64(),
@@ -1363,6 +1612,17 @@ func ChunkDataResponseMsgFixture(chunkID flow.Identifier, opts ...func(*messages
 	return cdp
 }
 
+// WithApproximateSize sets the ChunkDataResponse to be approximately bytes in size.
+func WithApproximateSize(bytes uint64) func(*messages.ChunkDataResponse) {
+	return func(request *messages.ChunkDataResponse) {
+		// 1 tx fixture is approximately 350 bytes
+		txCount := bytes / 350
+		collection := CollectionFixture(int(txCount) + 1)
+		pack := ChunkDataPackFixture(request.ChunkDataPack.ChunkID, WithChunkDataPackCollection(&collection))
+		request.ChunkDataPack = *pack
+	}
+}
+
 // ChunkDataResponseMessageListFixture creates a list of chunk data response messages each with a single-transaction collection, and random chunk ID.
 func ChunkDataResponseMessageListFixture(chunkIDs flow.IdentifierList) []*messages.ChunkDataResponse {
 	lst := make([]*messages.ChunkDataResponse, 0, len(chunkIDs))
@@ -1373,7 +1633,10 @@ func ChunkDataResponseMessageListFixture(chunkIDs flow.IdentifierList) []*messag
 }
 
 // ChunkDataPackRequestListFixture creates and returns a list of chunk data pack requests fixtures.
-func ChunkDataPackRequestListFixture(n int, opts ...func(*verification.ChunkDataPackRequest)) verification.ChunkDataPackRequestList {
+func ChunkDataPackRequestListFixture(
+	n int,
+	opts ...func(*verification.ChunkDataPackRequest),
+) verification.ChunkDataPackRequestList {
 	lst := make([]*verification.ChunkDataPackRequest, 0, n)
 	for i := 0; i < n; i++ {
 		lst = append(lst, ChunkDataPackRequestFixture(opts...))
@@ -1461,13 +1724,20 @@ func WithStartState(startState flow.StateCommitment) func(*flow.ChunkDataPack) {
 	}
 }
 
-func ChunkDataPackFixture(chunkID flow.Identifier, opts ...func(*flow.ChunkDataPack)) *flow.ChunkDataPack {
+func ChunkDataPackFixture(
+	chunkID flow.Identifier,
+	opts ...func(*flow.ChunkDataPack),
+) *flow.ChunkDataPack {
 	coll := CollectionFixture(1)
 	cdp := &flow.ChunkDataPack{
 		ChunkID:    chunkID,
 		StartState: StateCommitmentFixture(),
 		Proof:      []byte{'p'},
 		Collection: &coll,
+		ExecutionDataRoot: flow.BlockExecutionDataRoot{
+			BlockID:               IdentifierFixture(),
+			ChunkExecutionDataIDs: []cid.Cid{flow.IdToCid(IdentifierFixture())},
+		},
 	}
 
 	for _, opt := range opts {
@@ -1477,13 +1747,25 @@ func ChunkDataPackFixture(chunkID flow.Identifier, opts ...func(*flow.ChunkDataP
 	return cdp
 }
 
-func ChunkDataPacksFixture(count int, opts ...func(*flow.ChunkDataPack)) []*flow.ChunkDataPack {
+func ChunkDataPacksFixture(
+	count int,
+	opts ...func(*flow.ChunkDataPack),
+) []*flow.ChunkDataPack {
 	chunkDataPacks := make([]*flow.ChunkDataPack, count)
 	for i := 0; i < count; i++ {
 		chunkDataPacks[i] = ChunkDataPackFixture(IdentifierFixture())
 	}
 
 	return chunkDataPacks
+}
+
+func ChunkDataPacksFixtureAndResult() ([]*flow.ChunkDataPack, *flow.ExecutionResult) {
+	result := ExecutionResultFixture()
+	cdps := make([]*flow.ChunkDataPack, 0, len(result.Chunks))
+	for _, c := range result.Chunks {
+		cdps = append(cdps, ChunkDataPackFixture(c.ID()))
+	}
+	return cdps, result
 }
 
 // SeedFixture returns a random []byte with length n
@@ -1503,24 +1785,48 @@ func SeedFixtures(m int, n int) [][]byte {
 }
 
 // BlockEventsFixture returns a block events model populated with random events of length n.
-func BlockEventsFixture(header *flow.Header, n int) flow.BlockEvents {
-	types := []flow.EventType{"A.0x1.Foo.Bar", "A.0x2.Zoo.Moo", "A.0x3.Goo.Hoo"}
+func BlockEventsFixture(
+	header *flow.Header,
+	n int,
+	types ...flow.EventType,
+) flow.BlockEvents {
+	return flow.BlockEvents{
+		BlockID:        header.ID(),
+		BlockHeight:    header.Height,
+		BlockTimestamp: header.Timestamp,
+		Events:         EventsFixture(n, types...),
+	}
+}
+
+func EventsFixture(
+	n int,
+	types ...flow.EventType,
+) []flow.Event {
+	if len(types) == 0 {
+		types = []flow.EventType{"A.0x1.Foo.Bar", "A.0x2.Zoo.Moo", "A.0x3.Goo.Hoo"}
+	}
 
 	events := make([]flow.Event, n)
 	for i := 0; i < n; i++ {
 		events[i] = EventFixture(types[i%len(types)], 0, uint32(i), IdentifierFixture(), 0)
 	}
 
-	return flow.BlockEvents{
-		BlockID:        header.ID(),
-		BlockHeight:    header.Height,
-		BlockTimestamp: header.Timestamp,
-		Events:         events,
-	}
+	return events
+}
+
+func EventTypeFixture(chainID flow.ChainID) flow.EventType {
+	eventType := fmt.Sprintf("A.%s.TestContract.TestEvent1", RandomAddressFixtureForChain(chainID))
+	return flow.EventType(eventType)
 }
 
 // EventFixture returns an event
-func EventFixture(eType flow.EventType, transactionIndex uint32, eventIndex uint32, txID flow.Identifier, _ int) flow.Event {
+func EventFixture(
+	eType flow.EventType,
+	transactionIndex uint32,
+	eventIndex uint32,
+	txID flow.Identifier,
+	_ int,
+) flow.Event {
 	return flow.Event{
 		Type:             eType,
 		TransactionIndex: transactionIndex,
@@ -1533,7 +1839,8 @@ func EventFixture(eType flow.EventType, transactionIndex uint32, eventIndex uint
 func EmulatorRootKey() (*flow.AccountPrivateKey, error) {
 
 	// TODO seems this key literal doesn't decode anymore
-	emulatorRootKey, err := crypto.DecodePrivateKey(crypto.ECDSAP256, []byte("f87db87930770201010420ae2cc975dcbdd0ebc56f268b1d8a95834c2955970aea27042d35ec9f298b9e5aa00a06082a8648ce3d030107a1440342000417f5a527137785d2d773fee84b4c7ee40266a1dd1f36ddd46ecf25db6df6a499459629174de83256f2a44ebd4325b9def67d523b755a8926218c4efb7904f8ce0203"))
+	emulatorRootKey, err := crypto.DecodePrivateKey(crypto.ECDSAP256,
+		[]byte("f87db87930770201010420ae2cc975dcbdd0ebc56f268b1d8a95834c2955970aea27042d35ec9f298b9e5aa00a06082a8648ce3d030107a1440342000417f5a527137785d2d773fee84b4c7ee40266a1dd1f36ddd46ecf25db6df6a499459629174de83256f2a44ebd4325b9def67d523b755a8926218c4efb7904f8ce0203"))
 	if err != nil {
 		return nil, err
 	}
@@ -1585,7 +1892,10 @@ func BatchListFixture(n int) []chainsync.Batch {
 	return batches
 }
 
-func BootstrapExecutionResultFixture(block *flow.Block, commit flow.StateCommitment) *flow.ExecutionResult {
+func BootstrapExecutionResultFixture(
+	block *flow.Block,
+	commit flow.StateCommitment,
+) *flow.ExecutionResult {
 	result := &flow.ExecutionResult{
 		BlockID:          block.ID(),
 		PreviousResultID: flow.ZeroID,
@@ -1632,7 +1942,10 @@ func QuorumCertificateWithSignerIDsFixture(opts ...func(*flow.QuorumCertificateW
 	return &qc
 }
 
-func QuorumCertificatesWithSignerIDsFixtures(n uint, opts ...func(*flow.QuorumCertificateWithSignerIDs)) []*flow.QuorumCertificateWithSignerIDs {
+func QuorumCertificatesWithSignerIDsFixtures(
+	n uint,
+	opts ...func(*flow.QuorumCertificateWithSignerIDs),
+) []*flow.QuorumCertificateWithSignerIDs {
 	qcs := make([]*flow.QuorumCertificateWithSignerIDs, 0, n)
 	for i := 0; i < int(n); i++ {
 		qcs = append(qcs, QuorumCertificateWithSignerIDsFixture(opts...))
@@ -1663,7 +1976,19 @@ func QuorumCertificateFixture(opts ...func(*flow.QuorumCertificate)) *flow.Quoru
 	return &qc
 }
 
-func QuorumCertificatesFixtures(n uint, opts ...func(*flow.QuorumCertificate)) []*flow.QuorumCertificate {
+// CertifyBlock returns a quorum certificate for the given block header
+func CertifyBlock(header *flow.Header) *flow.QuorumCertificate {
+	qc := QuorumCertificateFixture(func(qc *flow.QuorumCertificate) {
+		qc.View = header.View
+		qc.BlockID = header.ID()
+	})
+	return qc
+}
+
+func QuorumCertificatesFixtures(
+	n uint,
+	opts ...func(*flow.QuorumCertificate),
+) []*flow.QuorumCertificate {
 	qcs := make([]*flow.QuorumCertificate, 0, n)
 	for i := 0; i < int(n); i++ {
 		qcs = append(qcs, QuorumCertificateFixture(opts...))
@@ -1680,6 +2005,13 @@ func QCWithBlockID(blockID flow.Identifier) func(*flow.QuorumCertificate) {
 func QCWithSignerIndices(signerIndices []byte) func(*flow.QuorumCertificate) {
 	return func(qc *flow.QuorumCertificate) {
 		qc.SignerIndices = signerIndices
+	}
+}
+
+func QCWithRootBlockID(blockID flow.Identifier) func(*flow.QuorumCertificate) {
+	return func(qc *flow.QuorumCertificate) {
+		qc.BlockID = blockID
+		qc.View = 0
 	}
 }
 
@@ -1716,7 +2048,10 @@ func WithVoteBlockID(blockID flow.Identifier) func(*hotstuff.Vote) {
 	}
 }
 
-func VoteForBlockFixture(block *hotstuff.Block, opts ...func(vote *hotstuff.Vote)) *hotstuff.Vote {
+func VoteForBlockFixture(
+	block *hotstuff.Block,
+	opts ...func(vote *hotstuff.Vote),
+) *hotstuff.Vote {
 	vote := VoteFixture(WithVoteView(block.View),
 		WithVoteBlockID(block.BlockID))
 
@@ -1739,10 +2074,10 @@ func VoteWithBeaconSig() func(*hotstuff.Vote) {
 	}
 }
 
-func WithParticipants(participants flow.IdentityList) func(*flow.EpochSetup) {
+func WithParticipants(participants flow.IdentitySkeletonList) func(*flow.EpochSetup) {
 	return func(setup *flow.EpochSetup) {
-		setup.Participants = participants.Sort(order.Canonical)
-		setup.Assignments = ClusterAssignment(1, participants)
+		setup.Participants = participants.Sort(flow.Canonical[flow.IdentitySkeleton])
+		setup.Assignments = ClusterAssignment(1, participants.ToSkeleton())
 	}
 }
 
@@ -1773,11 +2108,13 @@ func EpochSetupFixture(opts ...func(setup *flow.EpochSetup)) *flow.EpochSetup {
 		Counter:            uint64(rand.Uint32()),
 		FirstView:          uint64(0),
 		FinalView:          uint64(rand.Uint32() + 1000),
-		Participants:       participants.Sort(order.Canonical),
+		Participants:       participants.Sort(flow.Canonical[flow.Identity]).ToSkeleton(),
 		RandomSource:       SeedFixture(flow.EpochSetupRandomSourceLength),
 		DKGPhase1FinalView: 100,
 		DKGPhase2FinalView: 200,
 		DKGPhase3FinalView: 300,
+		TargetDuration:     60 * 60,
+		TargetEndTime:      uint64(time.Now().Add(time.Hour).Unix()),
 	}
 	for _, apply := range opts {
 		apply(setup)
@@ -1788,21 +2125,26 @@ func EpochSetupFixture(opts ...func(setup *flow.EpochSetup)) *flow.EpochSetup {
 	return setup
 }
 
-func EpochStatusFixture() *flow.EpochStatus {
-	return &flow.EpochStatus{
-		PreviousEpoch: flow.EventIDs{
-			SetupID:  IdentifierFixture(),
-			CommitID: IdentifierFixture(),
-		},
-		CurrentEpoch: flow.EventIDs{
-			SetupID:  IdentifierFixture(),
-			CommitID: IdentifierFixture(),
-		},
-		NextEpoch: flow.EventIDs{
-			SetupID:  IdentifierFixture(),
-			CommitID: IdentifierFixture(),
-		},
+// EpochRecoverFixture creates a valid EpochRecover with default properties for testing.
+// The default properties for setup part can be overwritten with optional parameter functions.
+// Commit part will be adjusted accordingly.
+func EpochRecoverFixture(opts ...func(setup *flow.EpochSetup)) *flow.EpochRecover {
+	setup := EpochSetupFixture()
+	for _, apply := range opts {
+		apply(setup)
 	}
+
+	commit := EpochCommitFixture(
+		CommitWithCounter(setup.Counter),
+		WithDKGFromParticipants(setup.Participants),
+		WithClusterQCsFromAssignments(setup.Assignments),
+	)
+
+	ev := &flow.EpochRecover{
+		EpochSetup:  *setup,
+		EpochCommit: *commit,
+	}
+	return ev
 }
 
 func IndexFixture() *flow.Index {
@@ -1813,7 +2155,7 @@ func IndexFixture() *flow.Index {
 	}
 }
 
-func WithDKGFromParticipants(participants flow.IdentityList) func(*flow.EpochCommit) {
+func WithDKGFromParticipants(participants flow.IdentitySkeletonList) func(*flow.EpochCommit) {
 	count := len(participants.Filter(filter.IsValidDKGParticipant))
 	return func(commit *flow.EpochCommit) {
 		commit.DKGParticipantKeys = PublicKeysFixture(count, crypto.BLSBLS12381)
@@ -1832,9 +2174,9 @@ func WithClusterQCsFromAssignments(assignments flow.AssignmentList) func(*flow.E
 	}
 }
 
-func DKGParticipantLookup(participants flow.IdentityList) map[flow.Identifier]flow.DKGParticipant {
+func DKGParticipantLookup(participants flow.IdentitySkeletonList) map[flow.Identifier]flow.DKGParticipant {
 	lookup := make(map[flow.Identifier]flow.DKGParticipant)
-	for i, node := range participants.Filter(filter.HasRole(flow.RoleConsensus)) {
+	for i, node := range participants.Filter(filter.HasRole[flow.IdentitySkeleton](flow.RoleConsensus)) {
 		lookup[node.NodeID] = flow.DKGParticipant{
 			Index:    uint(i),
 			KeyShare: KeyFixture(crypto.BLSBLS12381).PublicKey(),
@@ -1862,30 +2204,93 @@ func EpochCommitFixture(opts ...func(*flow.EpochCommit)) *flow.EpochCommit {
 	return commit
 }
 
+func WithBoundaries(boundaries ...flow.VersionBoundary) func(*flow.VersionBeacon) {
+	return func(b *flow.VersionBeacon) {
+		b.VersionBoundaries = append(b.VersionBoundaries, boundaries...)
+	}
+}
+
+func VersionBeaconFixture(options ...func(*flow.VersionBeacon)) *flow.VersionBeacon {
+
+	versionTable := &flow.VersionBeacon{
+		VersionBoundaries: []flow.VersionBoundary{},
+		Sequence:          uint64(0),
+	}
+	opts := options
+
+	if len(opts) == 0 {
+		opts = []func(*flow.VersionBeacon){
+			WithBoundaries(flow.VersionBoundary{
+				Version:     "0.0.0",
+				BlockHeight: 0,
+			}),
+		}
+	}
+
+	for _, apply := range opts {
+		apply(versionTable)
+	}
+
+	return versionTable
+}
+
+func ProtocolStateVersionUpgradeFixture() *flow.ProtocolStateVersionUpgrade {
+	return &flow.ProtocolStateVersionUpgrade{
+		NewProtocolStateVersion: rand.Uint64(),
+		ActiveView:              rand.Uint64(),
+	}
+}
+
 // BootstrapFixture generates all the artifacts necessary to bootstrap the
 // protocol state.
-func BootstrapFixture(participants flow.IdentityList, opts ...func(*flow.Block)) (*flow.Block, *flow.ExecutionResult, *flow.Seal) {
+func BootstrapFixture(
+	participants flow.IdentityList,
+	opts ...func(*flow.Block),
+) (*flow.Block, *flow.ExecutionResult, *flow.Seal) {
+	return BootstrapFixtureWithChainID(participants, flow.Emulator, opts...)
+}
 
-	root := GenesisFixture()
+func BootstrapFixtureWithChainID(
+	participants flow.IdentityList,
+	chainID flow.ChainID,
+	opts ...func(*flow.Block),
+) (*flow.Block, *flow.ExecutionResult, *flow.Seal) {
+
+	root := flow.Genesis(chainID)
 	for _, apply := range opts {
 		apply(root)
 	}
 
 	counter := uint64(1)
 	setup := EpochSetupFixture(
-		WithParticipants(participants),
+		WithParticipants(participants.ToSkeleton()),
 		SetupWithCounter(counter),
 		WithFirstView(root.Header.View),
-		WithFinalView(root.Header.View+1000),
+		WithFinalView(root.Header.View+100_000),
 	)
 	commit := EpochCommitFixture(
 		CommitWithCounter(counter),
 		WithClusterQCsFromAssignments(setup.Assignments),
-		WithDKGFromParticipants(participants),
+		WithDKGFromParticipants(participants.ToSkeleton()),
 	)
 
-	result := BootstrapExecutionResultFixture(root, GenesisStateCommitment)
-	result.ServiceEvents = []flow.ServiceEvent{setup.ServiceEvent(), commit.ServiceEvent()}
+	safetyParams, err := protocol.DefaultEpochSafetyParams(root.Header.ChainID)
+	if err != nil {
+		panic(err)
+	}
+	rootEpochState := inmem.EpochProtocolStateFromServiceEvents(setup, commit)
+	rootProtocolState, err := kvstore.NewDefaultKVStore(safetyParams.FinalizationSafetyThreshold, safetyParams.EpochExtensionViewCount, rootEpochState.ID())
+	if err != nil {
+		panic(err)
+	}
+	root.SetPayload(flow.Payload{ProtocolStateID: rootProtocolState.ID()})
+	stateCommit := GenesisStateCommitmentByChainID(chainID)
+
+	result := BootstrapExecutionResultFixture(root, stateCommit)
+	result.ServiceEvents = []flow.ServiceEvent{
+		setup.ServiceEvent(),
+		commit.ServiceEvent(),
+	}
 
 	seal := Seal.Fixture(Seal.WithResult(result))
 
@@ -1894,9 +2299,20 @@ func BootstrapFixture(participants flow.IdentityList, opts ...func(*flow.Block))
 
 // RootSnapshotFixture returns a snapshot representing a root chain state, for
 // example one as returned from BootstrapFixture.
-func RootSnapshotFixture(participants flow.IdentityList, opts ...func(*flow.Block)) *inmem.Snapshot {
-	block, result, seal := BootstrapFixture(participants.Sort(order.Canonical), opts...)
-	qc := QuorumCertificateFixture(QCWithBlockID(block.ID()))
+func RootSnapshotFixture(
+	participants flow.IdentityList,
+	opts ...func(*flow.Block),
+) *inmem.Snapshot {
+	return RootSnapshotFixtureWithChainID(participants, flow.Emulator, opts...)
+}
+
+func RootSnapshotFixtureWithChainID(
+	participants flow.IdentityList,
+	chainID flow.ChainID,
+	opts ...func(*flow.Block),
+) *inmem.Snapshot {
+	block, result, seal := BootstrapFixtureWithChainID(participants.Sort(flow.Canonical[flow.Identity]), chainID, opts...)
+	qc := QuorumCertificateFixture(QCWithRootBlockID(block.ID()))
 	root, err := inmem.SnapshotFromBootstrapState(block, result, seal, qc)
 	if err != nil {
 		panic(err)
@@ -1904,7 +2320,10 @@ func RootSnapshotFixture(participants flow.IdentityList, opts ...func(*flow.Bloc
 	return root
 }
 
-func SnapshotClusterByIndex(snapshot *inmem.Snapshot, clusterIndex uint) (protocol.Cluster, error) {
+func SnapshotClusterByIndex(
+	snapshot *inmem.Snapshot,
+	clusterIndex uint,
+) (protocol.Cluster, error) {
 	epochs := snapshot.Epochs()
 	epoch := epochs.Current()
 	cluster, err := epoch.Cluster(clusterIndex)
@@ -1915,7 +2334,11 @@ func SnapshotClusterByIndex(snapshot *inmem.Snapshot, clusterIndex uint) (protoc
 }
 
 // ChainFixture creates a list of blocks that forms a chain
-func ChainFixture(nonGenesisCount int) ([]*flow.Block, *flow.ExecutionResult, *flow.Seal) {
+func ChainFixture(nonGenesisCount int) (
+	[]*flow.Block,
+	*flow.ExecutionResult,
+	*flow.Seal,
+) {
 	chain := make([]*flow.Block, 0, nonGenesisCount+1)
 
 	participants := IdentityListFixture(5, WithAllRoles())
@@ -1941,7 +2364,10 @@ func ChainFixtureFrom(count int, parent *flow.Header) []*flow.Block {
 	return blocks
 }
 
-func ReceiptChainFor(blocks []*flow.Block, result0 *flow.ExecutionResult) []*flow.ExecutionReceipt {
+func ReceiptChainFor(
+	blocks []*flow.Block,
+	result0 *flow.ExecutionResult,
+) []*flow.ExecutionReceipt {
 	receipts := make([]*flow.ExecutionReceipt, len(blocks))
 	receipts[0] = ExecutionReceiptFixture(WithResult(result0))
 	receipts[0].ExecutionResult.BlockID = blocks[0].ID()
@@ -2019,7 +2445,11 @@ func PrivateKeyFixture(algo crypto.SigningAlgorithm, seedLength int) crypto.Priv
 
 // PrivateKeyFixtureByIdentifier returns a private key for a given node.
 // given the same identifier, it will always return the same private key
-func PrivateKeyFixtureByIdentifier(algo crypto.SigningAlgorithm, seedLength int, id flow.Identifier) crypto.PrivateKey {
+func PrivateKeyFixtureByIdentifier(
+	algo crypto.SigningAlgorithm,
+	seedLength int,
+	id flow.Identifier,
+) crypto.PrivateKey {
 	seed := append(id[:], id[:]...)
 	sk, err := crypto.GeneratePrivateKey(algo, seed[:seedLength])
 	if err != nil {
@@ -2029,17 +2459,17 @@ func PrivateKeyFixtureByIdentifier(algo crypto.SigningAlgorithm, seedLength int,
 }
 
 func StakingPrivKeyByIdentifier(id flow.Identifier) crypto.PrivateKey {
-	return PrivateKeyFixtureByIdentifier(crypto.BLSBLS12381, crypto.KeyGenSeedMinLenBLSBLS12381, id)
+	return PrivateKeyFixtureByIdentifier(crypto.BLSBLS12381, crypto.KeyGenSeedMinLen, id)
 }
 
 // NetworkingPrivKeyFixture returns random ECDSAP256 private key
 func NetworkingPrivKeyFixture() crypto.PrivateKey {
-	return PrivateKeyFixture(crypto.ECDSAP256, crypto.KeyGenSeedMinLenECDSAP256)
+	return PrivateKeyFixture(crypto.ECDSAP256, crypto.KeyGenSeedMinLen)
 }
 
 // StakingPrivKeyFixture returns a random BLS12381 private keyf
 func StakingPrivKeyFixture() crypto.PrivateKey {
-	return PrivateKeyFixture(crypto.BLSBLS12381, crypto.KeyGenSeedMinLenBLSBLS12381)
+	return PrivateKeyFixture(crypto.BLSBLS12381, crypto.KeyGenSeedMinLen)
 }
 
 func NodeMachineAccountInfoFixture() bootstrap.NodeMachineAccountInfo {
@@ -2052,7 +2482,10 @@ func NodeMachineAccountInfoFixture() bootstrap.NodeMachineAccountInfo {
 	}
 }
 
-func MachineAccountFixture(t *testing.T) (bootstrap.NodeMachineAccountInfo, *sdk.Account) {
+func MachineAccountFixture(t *testing.T) (
+	bootstrap.NodeMachineAccountInfo,
+	*sdk.Account,
+) {
 	info := NodeMachineAccountInfoFixture()
 
 	bal, err := cadence.NewUFix64("0.5")
@@ -2063,7 +2496,7 @@ func MachineAccountFixture(t *testing.T) (bootstrap.NodeMachineAccountInfo, *sdk
 		Balance: uint64(bal),
 		Keys: []*sdk.AccountKey{
 			{
-				Index:     int(info.KeyIndex),
+				Index:     info.KeyIndex,
 				PublicKey: info.MustPrivateKey().PublicKey(),
 				SigAlgo:   info.SigningAlgorithm,
 				HashAlgo:  info.HashAlgorithm,
@@ -2086,6 +2519,18 @@ func TransactionResultsFixture(n int) []flow.TransactionResult {
 	return results
 }
 
+func LightTransactionResultsFixture(n int) []flow.LightTransactionResult {
+	results := make([]flow.LightTransactionResult, 0, n)
+	for i := 0; i < n; i++ {
+		results = append(results, flow.LightTransactionResult{
+			TransactionID:   IdentifierFixture(),
+			Failed:          i%2 == 0,
+			ComputationUsed: Uint64InRange(1, 10_000),
+		})
+	}
+	return results
+}
+
 func AllowAllPeerFilter() func(peer.ID) error {
 	return func(_ peer.ID) error {
 		return nil
@@ -2102,7 +2547,7 @@ func NewSealingConfigs(val uint) module.SealingConfigsSetter {
 	if err != nil {
 		panic(err)
 	}
-	_, err = instance.SetRequiredApprovalsForSealingConstruction(val)
+	err = instance.SetRequiredApprovalsForSealingConstruction(val)
 	if err != nil {
 		panic(err)
 	}
@@ -2122,4 +2567,575 @@ func PeerIDFromFlowID(identity *flow.Identity) (peer.ID, error) {
 	}
 
 	return peerID, nil
+}
+
+func EngineMessageFixture() *engine.Message {
+	return &engine.Message{
+		OriginID: IdentifierFixture(),
+		Payload:  RandomBytes(10),
+	}
+}
+
+func EngineMessageFixtures(count int) []*engine.Message {
+	messages := make([]*engine.Message, 0, count)
+	for i := 0; i < count; i++ {
+		messages = append(messages, EngineMessageFixture())
+	}
+	return messages
+}
+
+// GetFlowProtocolEventID returns the event ID for the event provided.
+func GetFlowProtocolEventID(
+	t *testing.T,
+	channel channels.Channel,
+	event interface{},
+) flow.Identifier {
+	payload, err := NetworkCodec().Encode(event)
+	require.NoError(t, err)
+	eventIDHash, err := message.EventId(channel, payload)
+	require.NoError(t, err)
+	return flow.HashToID(eventIDHash)
+}
+
+func WithBlockExecutionDataBlockID(blockID flow.Identifier) func(*execution_data.BlockExecutionData) {
+	return func(bed *execution_data.BlockExecutionData) {
+		bed.BlockID = blockID
+	}
+}
+
+func WithChunkExecutionDatas(chunks ...*execution_data.ChunkExecutionData) func(*execution_data.BlockExecutionData) {
+	return func(bed *execution_data.BlockExecutionData) {
+		bed.ChunkExecutionDatas = chunks
+	}
+}
+
+func BlockExecutionDataFixture(opts ...func(*execution_data.BlockExecutionData)) *execution_data.BlockExecutionData {
+	bed := &execution_data.BlockExecutionData{
+		BlockID:             IdentifierFixture(),
+		ChunkExecutionDatas: []*execution_data.ChunkExecutionData{},
+	}
+
+	for _, opt := range opts {
+		opt(bed)
+	}
+
+	return bed
+}
+
+func BlockExecutionDatEntityFixture(opts ...func(*execution_data.BlockExecutionData)) *execution_data.BlockExecutionDataEntity {
+	execData := BlockExecutionDataFixture(opts...)
+	return execution_data.NewBlockExecutionDataEntity(IdentifierFixture(), execData)
+}
+
+func BlockExecutionDatEntityListFixture(n int) []*execution_data.BlockExecutionDataEntity {
+	l := make([]*execution_data.BlockExecutionDataEntity, n)
+	for i := 0; i < n; i++ {
+		l[i] = BlockExecutionDatEntityFixture()
+	}
+
+	return l
+}
+
+func WithChunkEvents(events flow.EventsList) func(*execution_data.ChunkExecutionData) {
+	return func(conf *execution_data.ChunkExecutionData) {
+		conf.Events = events
+	}
+}
+
+func WithTrieUpdate(trieUpdate *ledger.TrieUpdate) func(*execution_data.ChunkExecutionData) {
+	return func(conf *execution_data.ChunkExecutionData) {
+		conf.TrieUpdate = trieUpdate
+	}
+}
+
+func ChunkExecutionDataFixture(t *testing.T, minSize int, opts ...func(*execution_data.ChunkExecutionData)) *execution_data.ChunkExecutionData {
+	collection := CollectionFixture(5)
+	results := make([]flow.LightTransactionResult, len(collection.Transactions))
+	for i, tx := range collection.Transactions {
+		results[i] = flow.LightTransactionResult{
+			TransactionID:   tx.ID(),
+			Failed:          false,
+			ComputationUsed: uint64(i * 100),
+		}
+	}
+
+	ced := &execution_data.ChunkExecutionData{
+		Collection:         &collection,
+		Events:             nil,
+		TrieUpdate:         testutils.TrieUpdateFixture(2, 1, 8),
+		TransactionResults: results,
+	}
+
+	for _, opt := range opts {
+		opt(ced)
+	}
+
+	if minSize <= 1 || ced.TrieUpdate == nil {
+		return ced
+	}
+
+	size := 1
+	for {
+		buf := &bytes.Buffer{}
+		require.NoError(t, execution_data.DefaultSerializer.Serialize(buf, ced))
+		if buf.Len() >= minSize {
+			return ced
+		}
+
+		v := make([]byte, size)
+		_, err := crand.Read(v)
+		require.NoError(t, err)
+
+		k, err := ced.TrieUpdate.Payloads[0].Key()
+		require.NoError(t, err)
+
+		ced.TrieUpdate.Payloads[0] = ledger.NewPayload(k, v)
+		size *= 2
+	}
+}
+
+// RootEpochProtocolStateFixture creates a fixture with correctly structured Epoch sub-state.
+// The epoch substate is part of the overall protocol state (KV store).
+// This can be useful for testing bootstrap when there is no previous epoch.
+func RootEpochProtocolStateFixture() *flow.RichEpochStateEntry {
+	currentEpochSetup := EpochSetupFixture(func(setup *flow.EpochSetup) {
+		setup.Counter = 1
+	})
+	currentEpochCommit := EpochCommitFixture(func(commit *flow.EpochCommit) {
+		commit.Counter = currentEpochSetup.Counter
+	})
+
+	allIdentities := make(flow.IdentityList, 0, len(currentEpochSetup.Participants))
+	for _, identity := range currentEpochSetup.Participants {
+		allIdentities = append(allIdentities, &flow.Identity{
+			IdentitySkeleton: *identity,
+			DynamicIdentity: flow.DynamicIdentity{
+				EpochParticipationStatus: flow.EpochParticipationStatusActive,
+			},
+		})
+	}
+	return &flow.RichEpochStateEntry{
+		EpochStateEntry: &flow.EpochStateEntry{
+			MinEpochStateEntry: &flow.MinEpochStateEntry{
+				PreviousEpoch: nil,
+				CurrentEpoch: flow.EpochStateContainer{
+					SetupID:          currentEpochSetup.ID(),
+					CommitID:         currentEpochCommit.ID(),
+					ActiveIdentities: flow.DynamicIdentityEntryListFromIdentities(allIdentities),
+				},
+				EpochFallbackTriggered: false,
+				NextEpoch:              nil,
+			},
+			PreviousEpochSetup:  nil,
+			PreviousEpochCommit: nil,
+			CurrentEpochSetup:   currentEpochSetup,
+			CurrentEpochCommit:  currentEpochCommit,
+			NextEpochSetup:      nil,
+			NextEpochCommit:     nil,
+		},
+		CurrentEpochIdentityTable: allIdentities,
+		NextEpochIdentityTable:    flow.IdentityList{},
+	}
+}
+
+// EpochStateFixture creates a fixture with correctly structured data. The returned Identity Table
+// represents the common situation during the staking phase of Epoch N+1:
+//   - we are currently in Epoch N
+//   - previous epoch N-1 is known (specifically EpochSetup and EpochCommit events)
+//   - network is currently in the staking phase to setup the next epoch, hence no service
+//     events for the next epoch exist
+//
+// In particular, the following consistency requirements hold:
+//   - Epoch setup and commit counters are set to match.
+//   - Identities are constructed from setup events.
+//   - Identities are sorted in canonical order.
+func EpochStateFixture(options ...func(*flow.RichEpochStateEntry)) *flow.RichEpochStateEntry {
+	prevEpochSetup := EpochSetupFixture()
+	prevEpochCommit := EpochCommitFixture(func(commit *flow.EpochCommit) {
+		commit.Counter = prevEpochSetup.Counter
+	})
+	currentEpochSetup := EpochSetupFixture(func(setup *flow.EpochSetup) {
+		setup.Counter = prevEpochSetup.Counter + 1
+		// reuse same participant for current epoch
+		sameParticipant := *prevEpochSetup.Participants[1]
+		setup.Participants = append(setup.Participants, &sameParticipant)
+		setup.Participants = setup.Participants.Sort(flow.Canonical[flow.IdentitySkeleton])
+	})
+	currentEpochCommit := EpochCommitFixture(func(commit *flow.EpochCommit) {
+		commit.Counter = currentEpochSetup.Counter
+	})
+
+	buildDefaultIdentities := func(setup *flow.EpochSetup) flow.IdentityList {
+		epochIdentities := make(flow.IdentityList, 0, len(setup.Participants))
+		for _, identity := range setup.Participants {
+			epochIdentities = append(epochIdentities, &flow.Identity{
+				IdentitySkeleton: *identity,
+				DynamicIdentity: flow.DynamicIdentity{
+					EpochParticipationStatus: flow.EpochParticipationStatusActive,
+				},
+			})
+		}
+		return epochIdentities.Sort(flow.Canonical[flow.Identity])
+	}
+
+	prevEpochIdentities := buildDefaultIdentities(prevEpochSetup)
+	currentEpochIdentities := buildDefaultIdentities(currentEpochSetup)
+	allIdentities := currentEpochIdentities.Union(
+		prevEpochIdentities.Map(mapfunc.WithEpochParticipationStatus(flow.EpochParticipationStatusLeaving)))
+
+	entry := &flow.RichEpochStateEntry{
+		EpochStateEntry: &flow.EpochStateEntry{
+			MinEpochStateEntry: &flow.MinEpochStateEntry{
+				CurrentEpoch: flow.EpochStateContainer{
+					SetupID:          currentEpochSetup.ID(),
+					CommitID:         currentEpochCommit.ID(),
+					ActiveIdentities: flow.DynamicIdentityEntryListFromIdentities(currentEpochIdentities),
+				},
+				PreviousEpoch: &flow.EpochStateContainer{
+					SetupID:          prevEpochSetup.ID(),
+					CommitID:         prevEpochCommit.ID(),
+					ActiveIdentities: flow.DynamicIdentityEntryListFromIdentities(prevEpochIdentities),
+				},
+				EpochFallbackTriggered: false,
+				NextEpoch:              nil,
+			},
+			PreviousEpochSetup:  prevEpochSetup,
+			PreviousEpochCommit: prevEpochCommit,
+			CurrentEpochSetup:   currentEpochSetup,
+			CurrentEpochCommit:  currentEpochCommit,
+			NextEpochSetup:      nil,
+			NextEpochCommit:     nil,
+		},
+		CurrentEpochIdentityTable: allIdentities,
+		NextEpochIdentityTable:    flow.IdentityList{},
+	}
+
+	for _, option := range options {
+		option(entry)
+	}
+
+	return entry
+}
+
+// WithNextEpochProtocolState creates a fixture with correctly structured data for next epoch.
+// The resulting Identity Table represents the common situation during the epoch commit phase for Epoch N+1:
+//   - We are currently in Epoch N.
+//   - The previous epoch N-1 is known (specifically EpochSetup and EpochCommit events).
+//   - The network has completed the epoch setup phase, i.e. published the EpochSetup and EpochCommit events for epoch N+1.
+func WithNextEpochProtocolState() func(entry *flow.RichEpochStateEntry) {
+	return func(entry *flow.RichEpochStateEntry) {
+		nextEpochSetup := EpochSetupFixture(func(setup *flow.EpochSetup) {
+			setup.Counter = entry.CurrentEpochSetup.Counter + 1
+			setup.FirstView = entry.CurrentEpochSetup.FinalView + 1
+			setup.FinalView = setup.FirstView + 1000
+			// reuse same participant for current epoch
+			sameParticipant := *entry.CurrentEpochSetup.Participants[1]
+			setup.Participants[1] = &sameParticipant
+			setup.Participants = setup.Participants.Sort(flow.Canonical[flow.IdentitySkeleton])
+		})
+		nextEpochCommit := EpochCommitFixture(func(commit *flow.EpochCommit) {
+			commit.Counter = nextEpochSetup.Counter
+		})
+
+		nextEpochParticipants := make(flow.IdentityList, 0, len(nextEpochSetup.Participants))
+		for _, identity := range nextEpochSetup.Participants {
+			nextEpochParticipants = append(nextEpochParticipants, &flow.Identity{
+				IdentitySkeleton: *identity,
+				DynamicIdentity: flow.DynamicIdentity{
+					EpochParticipationStatus: flow.EpochParticipationStatusActive,
+				},
+			})
+		}
+		nextEpochParticipants = nextEpochParticipants.Sort(flow.Canonical[flow.Identity])
+
+		currentEpochParticipants := entry.CurrentEpochIdentityTable.Filter(func(identity *flow.Identity) bool {
+			_, found := entry.CurrentEpochSetup.Participants.ByNodeID(identity.NodeID)
+			return found
+		}).Sort(flow.Canonical[flow.Identity])
+
+		entry.CurrentEpochIdentityTable = currentEpochParticipants.Union(
+			nextEpochParticipants.Map(mapfunc.WithEpochParticipationStatus(flow.EpochParticipationStatusJoining)))
+		entry.NextEpochIdentityTable = nextEpochParticipants.Union(
+			currentEpochParticipants.Map(mapfunc.WithEpochParticipationStatus(flow.EpochParticipationStatusLeaving)))
+
+		entry.NextEpoch = &flow.EpochStateContainer{
+			SetupID:          nextEpochSetup.ID(),
+			CommitID:         nextEpochCommit.ID(),
+			ActiveIdentities: flow.DynamicIdentityEntryListFromIdentities(nextEpochParticipants),
+		}
+		entry.NextEpochSetup = nextEpochSetup
+		entry.NextEpochCommit = nextEpochCommit
+	}
+}
+
+// WithValidDKG updated protocol state with correctly structured data for DKG.
+func WithValidDKG() func(*flow.RichEpochStateEntry) {
+	return func(entry *flow.RichEpochStateEntry) {
+		commit := entry.CurrentEpochCommit
+		dkgParticipants := entry.CurrentEpochSetup.Participants.Filter(filter.IsValidDKGParticipant)
+		lookup := DKGParticipantLookup(dkgParticipants)
+		commit.DKGParticipantKeys = make([]crypto.PublicKey, len(lookup))
+		for _, participant := range lookup {
+			commit.DKGParticipantKeys[participant.Index] = participant.KeyShare
+		}
+	}
+}
+
+// EpochProtocolStateEntryFixture returns a flow.MinEpochStateEntry fixture.
+//   - PreviousEpoch is always nil
+//   - tentativePhase defines what service events should be defined for the NextEpoch
+//   - efmTriggered defines whether the EpochFallbackTriggered flag should be set.
+func EpochProtocolStateEntryFixture(tentativePhase flow.EpochPhase, efmTriggered bool) flow.MinEpochStateEntry {
+	identities := DynamicIdentityEntryListFixture(5)
+	entry := flow.MinEpochStateEntry{
+		EpochFallbackTriggered: efmTriggered,
+		PreviousEpoch:          nil,
+		CurrentEpoch: flow.EpochStateContainer{
+			SetupID:          IdentifierFixture(),
+			CommitID:         IdentifierFixture(),
+			ActiveIdentities: identities,
+		},
+		NextEpoch: nil,
+	}
+
+	switch tentativePhase {
+	case flow.EpochPhaseStaking:
+		break
+	case flow.EpochPhaseSetup:
+		entry.NextEpoch = &flow.EpochStateContainer{
+			SetupID:          IdentifierFixture(),
+			CommitID:         flow.ZeroID,
+			ActiveIdentities: identities,
+		}
+	case flow.EpochPhaseCommitted:
+		entry.NextEpoch = &flow.EpochStateContainer{
+			SetupID:          IdentifierFixture(),
+			CommitID:         IdentifierFixture(),
+			ActiveIdentities: identities,
+		}
+	default:
+		panic("unexpected input phase: " + tentativePhase.String())
+	}
+	return entry
+}
+
+func CreateSendTxHttpPayload(tx flow.TransactionBody) map[string]interface{} {
+	tx.Arguments = [][]uint8{} // fix how fixture creates nil values
+	auth := make([]string, len(tx.Authorizers))
+	for i, a := range tx.Authorizers {
+		auth[i] = a.String()
+	}
+
+	return map[string]interface{}{
+		"script":             util.ToBase64(tx.Script),
+		"arguments":          tx.Arguments,
+		"reference_block_id": tx.ReferenceBlockID.String(),
+		"gas_limit":          fmt.Sprintf("%d", tx.GasLimit),
+		"payer":              tx.Payer.String(),
+		"proposal_key": map[string]interface{}{
+			"address":         tx.ProposalKey.Address.String(),
+			"key_index":       fmt.Sprintf("%d", tx.ProposalKey.KeyIndex),
+			"sequence_number": fmt.Sprintf("%d", tx.ProposalKey.SequenceNumber),
+		},
+		"authorizers": auth,
+		"payload_signatures": []map[string]interface{}{{
+			"address":   tx.PayloadSignatures[0].Address.String(),
+			"key_index": fmt.Sprintf("%d", tx.PayloadSignatures[0].KeyIndex),
+			"signature": util.ToBase64(tx.PayloadSignatures[0].Signature),
+		}},
+		"envelope_signatures": []map[string]interface{}{{
+			"address":   tx.EnvelopeSignatures[0].Address.String(),
+			"key_index": fmt.Sprintf("%d", tx.EnvelopeSignatures[0].KeyIndex),
+			"signature": util.ToBase64(tx.EnvelopeSignatures[0].Signature),
+		}},
+	}
+}
+
+// P2PRPCGraftFixtures returns n number of control message rpc Graft fixtures.
+func P2PRPCGraftFixtures(topics ...string) []*pubsub_pb.ControlGraft {
+	n := len(topics)
+	grafts := make([]*pubsub_pb.ControlGraft, n)
+	for i := 0; i < n; i++ {
+		grafts[i] = P2PRPCGraftFixture(&topics[i])
+	}
+	return grafts
+}
+
+// P2PRPCGraftFixture returns a control message rpc Graft fixture.
+func P2PRPCGraftFixture(topic *string) *pubsub_pb.ControlGraft {
+	return &pubsub_pb.ControlGraft{
+		TopicID: topic,
+	}
+}
+
+// P2PRPCPruneFixtures returns n number of control message rpc Prune fixtures.
+func P2PRPCPruneFixtures(topics ...string) []*pubsub_pb.ControlPrune {
+	n := len(topics)
+	prunes := make([]*pubsub_pb.ControlPrune, n)
+	for i := 0; i < n; i++ {
+		prunes[i] = P2PRPCPruneFixture(&topics[i])
+	}
+	return prunes
+}
+
+// P2PRPCPruneFixture returns a control message rpc Prune fixture.
+func P2PRPCPruneFixture(topic *string) *pubsub_pb.ControlPrune {
+	return &pubsub_pb.ControlPrune{
+		TopicID: topic,
+	}
+}
+
+// P2PRPCIHaveFixtures returns n number of control message where n = len(topics) rpc iHave fixtures with m number of message ids each.
+func P2PRPCIHaveFixtures(m int, topics ...string) []*pubsub_pb.ControlIHave {
+	n := len(topics)
+	ihaves := make([]*pubsub_pb.ControlIHave, n)
+	for i := 0; i < n; i++ {
+		ihaves[i] = P2PRPCIHaveFixture(&topics[i], IdentifierListFixture(m).Strings()...)
+	}
+	return ihaves
+}
+
+// P2PRPCIHaveFixture returns a control message rpc iHave fixture.
+func P2PRPCIHaveFixture(topic *string, messageIds ...string) *pubsub_pb.ControlIHave {
+	return &pubsub_pb.ControlIHave{
+		TopicID:    topic,
+		MessageIDs: messageIds,
+	}
+}
+
+// P2PRPCIWantFixtures returns n number of control message rpc iWant fixtures with m number of message ids each.
+func P2PRPCIWantFixtures(n, m int) []*pubsub_pb.ControlIWant {
+	iwants := make([]*pubsub_pb.ControlIWant, n)
+	for i := 0; i < n; i++ {
+		iwants[i] = P2PRPCIWantFixture(IdentifierListFixture(m).Strings()...)
+	}
+	return iwants
+}
+
+// P2PRPCIWantFixture returns a control message rpc iWant fixture.
+func P2PRPCIWantFixture(messageIds ...string) *pubsub_pb.ControlIWant {
+	return &pubsub_pb.ControlIWant{
+		MessageIDs: messageIds,
+	}
+}
+
+type RPCFixtureOpt func(rpc *pubsub.RPC)
+
+// WithGrafts sets the grafts on the rpc control message.
+func WithGrafts(grafts ...*pubsub_pb.ControlGraft) RPCFixtureOpt {
+	return func(rpc *pubsub.RPC) {
+		rpc.Control.Graft = grafts
+	}
+}
+
+// WithPrunes sets the prunes on the rpc control message.
+func WithPrunes(prunes ...*pubsub_pb.ControlPrune) RPCFixtureOpt {
+	return func(rpc *pubsub.RPC) {
+		rpc.Control.Prune = prunes
+	}
+}
+
+// WithIHaves sets the iHaves on the rpc control message.
+func WithIHaves(iHaves ...*pubsub_pb.ControlIHave) RPCFixtureOpt {
+	return func(rpc *pubsub.RPC) {
+		rpc.Control.Ihave = iHaves
+	}
+}
+
+// WithIWants sets the iWants on the rpc control message.
+func WithIWants(iWants ...*pubsub_pb.ControlIWant) RPCFixtureOpt {
+	return func(rpc *pubsub.RPC) {
+		rpc.Control.Iwant = iWants
+	}
+}
+
+func WithPubsubMessages(msgs ...*pubsub_pb.Message) RPCFixtureOpt {
+	return func(rpc *pubsub.RPC) {
+		rpc.Publish = msgs
+	}
+}
+
+// P2PRPCFixture returns a pubsub RPC fixture. Currently, this fixture only sets the ControlMessage field.
+func P2PRPCFixture(opts ...RPCFixtureOpt) *pubsub.RPC {
+	rpc := &pubsub.RPC{
+		RPC: pubsub_pb.RPC{
+			Control: &pubsub_pb.ControlMessage{},
+		},
+	}
+
+	for _, opt := range opts {
+		opt(rpc)
+	}
+
+	return rpc
+}
+
+func WithFrom(pid peer.ID) func(*pubsub_pb.Message) {
+	return func(msg *pubsub_pb.Message) {
+		msg.From = []byte(pid)
+	}
+}
+
+// GossipSubMessageFixture returns a gossip sub message fixture for the specified topic.
+func GossipSubMessageFixture(s string, opts ...func(*pubsub_pb.Message)) *pubsub_pb.Message {
+	pb := &pubsub_pb.Message{
+		From:      RandomBytes(32),
+		Data:      RandomBytes(32),
+		Seqno:     RandomBytes(10),
+		Topic:     &s,
+		Signature: RandomBytes(100),
+		Key:       RandomBytes(32),
+	}
+
+	for _, opt := range opts {
+		opt(pb)
+	}
+
+	return pb
+}
+
+// GossipSubMessageFixtures returns a list of gossipsub message fixtures.
+func GossipSubMessageFixtures(n int, topic string, opts ...func(*pubsub_pb.Message)) []*pubsub_pb.Message {
+	msgs := make([]*pubsub_pb.Message, n)
+	for i := 0; i < n; i++ {
+		msgs[i] = GossipSubMessageFixture(topic, opts...)
+	}
+	return msgs
+}
+
+// LibP2PResourceLimitOverrideFixture returns a random resource limit override for testing.
+// The values are not guaranteed to be valid between 0 and 1000.
+// Returns:
+//   - p2pconf.ResourceManagerOverrideLimit: a random resource limit override.
+func LibP2PResourceLimitOverrideFixture() p2pconfig.ResourceManagerOverrideLimit {
+	return p2pconfig.ResourceManagerOverrideLimit{
+		StreamsInbound:      rand.Intn(1000),
+		StreamsOutbound:     rand.Intn(1000),
+		ConnectionsInbound:  rand.Intn(1000),
+		ConnectionsOutbound: rand.Intn(1000),
+		FD:                  rand.Intn(1000),
+		Memory:              rand.Intn(1000),
+	}
+}
+
+func RegisterEntryFixture() flow.RegisterEntry {
+	val := make([]byte, 4)
+	_, _ = crand.Read(val)
+	return flow.RegisterEntry{
+		Key: flow.RegisterID{
+			Owner: "owner",
+			Key:   "key1",
+		},
+		Value: val,
+	}
+}
+
+func MakeOwnerReg(key string, value string) flow.RegisterEntry {
+	return flow.RegisterEntry{
+		Key: flow.RegisterID{
+			Owner: "owner",
+			Key:   key,
+		},
+		Value: []byte(value),
+	}
 }

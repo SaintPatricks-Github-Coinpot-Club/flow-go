@@ -19,9 +19,25 @@ var ErrComponentShutdown = fmt.Errorf("component has already shut down")
 // channels that close when startup and shutdown have completed.
 // Once Start has been called, the channel returned by Done must close eventually,
 // whether that be because of a graceful shutdown or an irrecoverable error.
+// See also ComponentManager below.
 type Component interface {
 	module.Startable
-	module.ReadyDoneAware
+	// Ready returns a ready channel that is closed once startup has completed.
+	// Unlike the previous [module.ReadyDoneAware] interface, Ready does not start the component,
+	// but only exposes information about whether the component has completed startup.
+	// To start the component, instead use the Start() method.
+	// Note that the ready channel may never close if errors are encountered during startup,
+	// or if shutdown has already commenced before startup is complete.
+	// This should be an idempotent method.
+	Ready() <-chan struct{}
+
+	// Done returns a done channel that is closed once shutdown has completed.
+	// Unlike the previous [module.ReadyDoneAware] interface, Done does not shut down the component,
+	// but only exposes information about whether the component has shut down yet.
+	// To shutdown the component, instead cancel the context that was passed to Start().
+	// Implementations must close the done channel even if errors are encountered during shutdown.
+	// This should be an idempotent method.
+	Done() <-chan struct{}
 }
 
 type ComponentFactory func() (Component, error)
@@ -30,7 +46,7 @@ type ComponentFactory func() (Component, error)
 // It is meant to inspect the error, determining its type and seeing if e.g. a restart or some other measure is suitable,
 // and then return an ErrorHandlingResult indicating how RunComponent should proceed.
 // Before returning, it could also:
-// - panic (in stagingnet / benchmark)
+// - panic (in sandboxnet / benchmark)
 // - log in various Error channels and / or send telemetry ...
 type OnError = func(error) ErrorHandlingResult
 
@@ -131,6 +147,13 @@ type ReadyFunc func()
 // as well as a ReadyFunc which must be called to signal that it is ready. The ComponentManager
 // waits until all workers have signaled that they are ready before closing its own Ready channel.
 type ComponentWorker func(ctx irrecoverable.SignalerContext, ready ReadyFunc)
+
+// NoopWorker is a worker routine which is immediately ready, does nothing, and
+// exits when the context is done.
+func NoopWorker(ctx irrecoverable.SignalerContext, ready ReadyFunc) {
+	ready()
+	<-ctx.Done()
+}
 
 // ComponentManagerBuilder provides a mechanism for building a ComponentManager
 type ComponentManagerBuilder interface {

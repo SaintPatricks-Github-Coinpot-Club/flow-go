@@ -1,75 +1,41 @@
 package fvm
 
 import (
-	otelTrace "go.opentelemetry.io/otel/trace"
-
-	"github.com/onflow/flow-go/fvm/errors"
-	"github.com/onflow/flow-go/fvm/programs"
-	"github.com/onflow/flow-go/fvm/state"
+	"github.com/onflow/flow-go/fvm/storage"
+	"github.com/onflow/flow-go/fvm/storage/logical"
 	"github.com/onflow/flow-go/model/flow"
 )
 
-// TODO(patrick): pass in initial snapshot time when we start supporting
-// speculative pre-processing / execution.
-func Transaction(tx *flow.TransactionBody, txIndex uint32) *TransactionProcedure {
-	return &TransactionProcedure{
-		ID:                     tx.ID(),
-		Transaction:            tx,
-		InitialSnapshotTxIndex: txIndex,
-		TxIndex:                txIndex,
-	}
+func Transaction(
+	txn *flow.TransactionBody,
+	txnIndex uint32,
+) *TransactionProcedure {
+	return NewTransaction(txn.ID(), txnIndex, txn)
 }
 
-type TransactionProcessor interface {
-	Process(
-		Context,
-		*TransactionProcedure,
-		*state.TransactionState,
-		*programs.TransactionPrograms,
-	) error
+func NewTransaction(
+	txnId flow.Identifier,
+	txnIndex uint32,
+	txnBody *flow.TransactionBody,
+) *TransactionProcedure {
+	return &TransactionProcedure{
+		ID:          txnId,
+		Transaction: txnBody,
+		TxIndex:     txnIndex,
+	}
 }
 
 type TransactionProcedure struct {
-	ID                     flow.Identifier
-	Transaction            *flow.TransactionBody
-	InitialSnapshotTxIndex uint32
-	TxIndex                uint32
-
-	Logs            []string
-	Events          []flow.Event
-	ServiceEvents   []flow.Event
-	ComputationUsed uint64
-	MemoryEstimate  uint64
-	Err             errors.Error
-	TraceSpan       otelTrace.Span
+	ID          flow.Identifier
+	Transaction *flow.TransactionBody
+	TxIndex     uint32
 }
 
-func (proc *TransactionProcedure) SetTraceSpan(traceSpan otelTrace.Span) {
-	proc.TraceSpan = traceSpan
-}
-
-func (proc *TransactionProcedure) Run(
+func (proc *TransactionProcedure) NewExecutor(
 	ctx Context,
-	txnState *state.TransactionState,
-	programs *programs.TransactionPrograms,
-) error {
-	for _, p := range ctx.TransactionProcessors {
-		err := p.Process(ctx, proc, txnState, programs)
-		txErr, failure := errors.SplitErrorTypes(err)
-		if failure != nil {
-			// log the full error path
-			ctx.Logger.Err(err).Msg("fatal error when execution a transaction")
-			return failure
-		}
-
-		if txErr != nil {
-			proc.Err = txErr
-			// TODO we should not break here we should continue for fee deductions
-			break
-		}
-	}
-
-	return nil
+	txnState storage.TransactionPreparer,
+) ProcedureExecutor {
+	return newTransactionExecutor(ctx, proc, txnState)
 }
 
 func (proc *TransactionProcedure) ComputationLimit(ctx Context) uint64 {
@@ -112,10 +78,6 @@ func (TransactionProcedure) Type() ProcedureType {
 	return TransactionProcedureType
 }
 
-func (proc *TransactionProcedure) InitialSnapshotTime() programs.LogicalTime {
-	return programs.LogicalTime(proc.InitialSnapshotTxIndex)
-}
-
-func (proc *TransactionProcedure) ExecutionTime() programs.LogicalTime {
-	return programs.LogicalTime(proc.TxIndex)
+func (proc *TransactionProcedure) ExecutionTime() logical.Time {
+	return logical.Time(proc.TxIndex)
 }

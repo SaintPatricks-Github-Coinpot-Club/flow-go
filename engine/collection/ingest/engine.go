@@ -46,7 +46,7 @@ type Engine struct {
 // New creates a new collection ingest engine.
 func New(
 	log zerolog.Logger,
-	net network.Network,
+	net network.EngineRegistry,
 	state protocol.State,
 	engMetrics module.EngineMetrics,
 	mempoolMetrics module.MempoolMetrics,
@@ -55,12 +55,13 @@ func New(
 	chain flow.Chain,
 	pools *epochs.TransactionPools,
 	config Config,
+	limiter *AddressRateLimiter,
 ) (*Engine, error) {
 
 	logger := log.With().Str("engine", "ingest").Logger()
 
-	transactionValidator := access.NewTransactionValidator(
-		access.NewProtocolStateBlocks(state),
+	transactionValidator := access.NewTransactionValidatorWithLimiter(
+		access.NewProtocolStateBlocks(state, nil),
 		chain,
 		access.TransactionValidationOptions{
 			Expiry:                 flow.DefaultTransactionExpiry,
@@ -70,11 +71,13 @@ func New(
 			MaxTransactionByteSize: config.MaxTransactionByteSize,
 			MaxCollectionByteSize:  config.MaxCollectionByteSize,
 		},
+		colMetrics,
+		limiter,
 	)
 
 	// FIFO queue for transactions
 	queue, err := fifoqueue.NewFifoQueue(
-		fifoqueue.WithCapacity(int(config.MaxMessageQueueSize)),
+		int(config.MaxMessageQueueSize),
 		fifoqueue.WithLengthObserver(func(len int) {
 			mempoolMetrics.MempoolEntries(metrics.ResourceTransactionIngestQueue, uint(len))
 		}),
@@ -261,8 +264,8 @@ func (e *Engine) onTransaction(originID flow.Identifier, tx *flow.TransactionBod
 		return fmt.Errorf("could not get cluster responsible for tx: %x", txID)
 	}
 
-	localClusterFingerPrint := localCluster.Fingerprint()
-	txClusterFingerPrint := txCluster.Fingerprint()
+	localClusterFingerPrint := localCluster.ID()
+	txClusterFingerPrint := txCluster.ID()
 	log = log.With().
 		Hex("local_cluster", logging.ID(localClusterFingerPrint)).
 		Hex("tx_cluster", logging.ID(txClusterFingerPrint)).
@@ -295,7 +298,7 @@ func (e *Engine) onTransaction(originID flow.Identifier, tx *flow.TransactionBod
 //     a member of the reference epoch. This is an expected condition and the transaction
 //     should be discarded.
 //   - other error for any other, unexpected error condition.
-func (e *Engine) getLocalCluster(refEpoch protocol.Epoch) (flow.IdentityList, error) {
+func (e *Engine) getLocalCluster(refEpoch protocol.Epoch) (flow.IdentitySkeletonList, error) {
 	epochCounter, err := refEpoch.Counter()
 	if err != nil {
 		return nil, fmt.Errorf("could not get counter for reference epoch: %w", err)
@@ -353,8 +356,8 @@ func (e *Engine) ingestTransaction(
 		return nil
 	}
 
-	// check if the transaction is valid
-	err = e.transactionValidator.Validate(tx)
+	// we don't pass actual ctx as we don't execute any scripts inside for now
+	err = e.transactionValidator.Validate(context.Background(), tx)
 	if err != nil {
 		return engine.NewInvalidInputErrorf("invalid transaction (%x): %w", txID, err)
 	}
@@ -370,7 +373,7 @@ func (e *Engine) ingestTransaction(
 
 // propagateTransaction propagates the transaction to a number of the responsible
 // cluster's members. Any unexpected networking errors are logged.
-func (e *Engine) propagateTransaction(log zerolog.Logger, tx *flow.TransactionBody, txCluster flow.IdentityList) {
+func (e *Engine) propagateTransaction(log zerolog.Logger, tx *flow.TransactionBody, txCluster flow.IdentitySkeletonList) {
 	log.Debug().Msg("propagating transaction to cluster")
 
 	err := e.conduit.Multicast(tx, e.config.PropagationRedundancy+1, txCluster.NodeIDs()...)

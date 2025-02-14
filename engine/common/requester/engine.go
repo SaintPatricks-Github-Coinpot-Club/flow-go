@@ -3,11 +3,11 @@ package requester
 import (
 	"fmt"
 	"math"
-	"math/rand"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/vmihailenco/msgpack"
+	"go.uber.org/atomic"
 
 	"github.com/onflow/flow-go/engine"
 	"github.com/onflow/flow-go/model/flow"
@@ -19,6 +19,7 @@ import (
 	"github.com/onflow/flow-go/network/channels"
 	"github.com/onflow/flow-go/state/protocol"
 	"github.com/onflow/flow-go/utils/logging"
+	"github.com/onflow/flow-go/utils/rand"
 )
 
 // HandleFunc is a function provided to the requester engine to handle an entity
@@ -42,18 +43,21 @@ type Engine struct {
 	state    protocol.State
 	con      network.Conduit
 	channel  channels.Channel
-	selector flow.IdentityFilter
+	selector flow.IdentityFilter[flow.Identity]
 	create   CreateFunc
 	handle   HandleFunc
-	items    map[flow.Identifier]*Item
-	requests map[uint64]*messages.EntityRequest
+
+	// changing the following state variables must be guarded by unit.Lock()
+	items                 map[flow.Identifier]*Item
+	requests              map[uint64]*messages.EntityRequest
+	forcedDispatchOngoing *atomic.Bool // to ensure only trigger dispatching logic once at any time
 }
 
 // New creates a new requester engine, operating on the provided network channel, and requesting entities from a node
 // within the set obtained by applying the provided selector filter. The options allow customization of the parameters
 // related to the batch and retry logic.
-func New(log zerolog.Logger, metrics module.EngineMetrics, net network.Network, me module.Local, state protocol.State,
-	channel channels.Channel, selector flow.IdentityFilter, create CreateFunc, options ...OptionFunc) (*Engine, error) {
+func New(log zerolog.Logger, metrics module.EngineMetrics, net network.EngineRegistry, me module.Local, state protocol.State,
+	channel channels.Channel, selector flow.IdentityFilter[flow.Identity], create CreateFunc, options ...OptionFunc) (*Engine, error) {
 
 	// initialize the default config
 	cfg := Config{
@@ -85,32 +89,34 @@ func New(log zerolog.Logger, metrics module.EngineMetrics, net network.Network, 
 	// make sure we don't send requests from self
 	selector = filter.And(
 		selector,
-		filter.Not(filter.HasNodeID(me.NodeID())),
-		filter.Not(filter.Ejected),
+		filter.Not(filter.HasNodeID[flow.Identity](me.NodeID())),
+		filter.Not(filter.HasParticipationStatus(flow.EpochParticipationStatusEjected)),
 	)
 
-	// make sure we don't send requests to unauthorized nodes
+	// make sure we only send requests to nodes that are active in the current epoch and have positive weight
 	if cfg.ValidateStaking {
 		selector = filter.And(
 			selector,
-			filter.HasWeight(true),
+			filter.HasInitialWeight[flow.Identity](true),
+			filter.HasParticipationStatus(flow.EpochParticipationStatusActive),
 		)
 	}
 
 	// initialize the propagation engine with its dependencies
 	e := &Engine{
-		unit:     engine.NewUnit(),
-		log:      log.With().Str("engine", "requester").Logger(),
-		cfg:      cfg,
-		metrics:  metrics,
-		me:       me,
-		state:    state,
-		channel:  channel,
-		selector: selector,
-		create:   create,
-		handle:   nil,
-		items:    make(map[flow.Identifier]*Item),          // holds all pending items
-		requests: make(map[uint64]*messages.EntityRequest), // holds all sent requests
+		unit:                  engine.NewUnit(),
+		log:                   log.With().Str("engine", "requester").Logger(),
+		cfg:                   cfg,
+		metrics:               metrics,
+		me:                    me,
+		state:                 state,
+		channel:               channel,
+		selector:              selector,
+		create:                create,
+		handle:                nil,
+		items:                 make(map[flow.Identifier]*Item),          // holds all pending items
+		requests:              make(map[uint64]*messages.EntityRequest), // holds all sent requests
+		forcedDispatchOngoing: atomic.NewBool(false),
 	}
 
 	// register the engine with the network layer and store the conduit
@@ -128,9 +134,8 @@ func New(log zerolog.Logger, metrics module.EngineMetrics, net network.Network, 
 // function. It is done in a separate call so that the requester can be injected
 // into engines upon construction, and then provide a handle function to the
 // requester from that engine itself.
-func (e *Engine) WithHandle(handle HandleFunc) *Engine {
+func (e *Engine) WithHandle(handle HandleFunc) {
 	e.handle = handle
-	return e
 }
 
 // Ready returns a ready channel that is closed once the engine has fully
@@ -196,7 +201,7 @@ func (e *Engine) Process(channel channels.Channel, originID flow.Identifier, mes
 // control over which subset of providers to request a given entity from, such as
 // selection of a collection cluster. Use `filter.Any` if no additional selection
 // is required. Checks integrity of response to make sure that we got entity that we were requesting.
-func (e *Engine) EntityByID(entityID flow.Identifier, selector flow.IdentityFilter) {
+func (e *Engine) EntityByID(entityID flow.Identifier, selector flow.IdentityFilter[flow.Identity]) {
 	e.addEntityRequest(entityID, selector, true)
 }
 
@@ -205,11 +210,11 @@ func (e *Engine) EntityByID(entityID flow.Identifier, selector flow.IdentityFilt
 // of valid providers for the data and allows finer-grained control
 // over which providers to request data from. Doesn't perform integrity check
 // can be used to get entities without knowing their ID.
-func (e *Engine) Query(key flow.Identifier, selector flow.IdentityFilter) {
+func (e *Engine) Query(key flow.Identifier, selector flow.IdentityFilter[flow.Identity]) {
 	e.addEntityRequest(key, selector, false)
 }
 
-func (e *Engine) addEntityRequest(entityID flow.Identifier, selector flow.IdentityFilter, checkIntegrity bool) {
+func (e *Engine) addEntityRequest(entityID flow.Identifier, selector flow.IdentityFilter[flow.Identity], checkIntegrity bool) {
 	e.unit.Lock()
 	defer e.unit.Unlock()
 
@@ -234,19 +239,31 @@ func (e *Engine) addEntityRequest(entityID flow.Identifier, selector flow.Identi
 // Force will force the requester engine to dispatch all currently
 // valid batch requests.
 func (e *Engine) Force() {
-	count := uint(0)
-	for {
-		dispatched, err := e.dispatchRequest()
-		if err != nil {
-			e.log.Error().Err(err).Msg("could not dispatch requests")
-			return
-		}
-		if !dispatched {
-			e.log.Debug().Uint("requests", count).Msg("forced request dispatch")
-			return
-		}
-		count++
+	// exit early in case a forced dispatch is currently ongoing
+	if e.forcedDispatchOngoing.Load() {
+		return
 	}
+
+	// using Launch to ensure the caller won't be blocked
+	e.unit.Launch(func() {
+		// using atomic bool to ensure there is at most one caller would trigger dispatching requests
+		if e.forcedDispatchOngoing.CompareAndSwap(false, true) {
+			count := uint(0)
+			for {
+				dispatched, err := e.dispatchRequest()
+				if err != nil {
+					e.log.Error().Err(err).Msg("could not dispatch requests")
+					break
+				}
+				if !dispatched {
+					e.log.Debug().Uint("requests", count).Msg("forced request dispatch")
+					break
+				}
+				count++
+			}
+			e.forcedDispatchOngoing.Store(false)
+		}
+	})
 }
 
 func (e *Engine) poll() {
@@ -259,6 +276,10 @@ PollLoop:
 			break PollLoop
 
 		case <-ticker.C:
+			if e.forcedDispatchOngoing.Load() {
+				return
+			}
+
 			dispatched, err := e.dispatchRequest()
 			if err != nil {
 				e.log.Error().Err(err).Msg("could not dispatch requests")
@@ -273,6 +294,11 @@ PollLoop:
 	ticker.Stop()
 }
 
+// dispatchRequest dispatches a subset of requests (selection based on internal heuristic).
+// While `dispatchRequest` sends a request (covering some but not necessarily all items),
+// if and only if there is something to request. In other words it cannot happen that
+// `dispatchRequest` sends no request, but there is something to be requested.
+// The boolean return value indicates whether a request was dispatched at all.
 func (e *Engine) dispatchRequest() (bool, error) {
 
 	e.unit.Lock()
@@ -300,6 +326,7 @@ func (e *Engine) dispatchRequest() (bool, error) {
 
 		// if the item reached maximum amount of retries, drop
 		if item.NumAttempts >= e.cfg.RetryAttempts {
+			e.log.Debug().Str("entity_id", entityID.String()).Msg("dropping entity ID max amount of retries reached")
 			delete(e.items, entityID)
 			continue
 		}
@@ -309,7 +336,7 @@ func (e *Engine) dispatchRequest() (bool, error) {
 		// for now, so it will be part of the next batch request
 		if providerID != flow.ZeroID {
 			overlap := providers.Filter(filter.And(
-				filter.HasNodeID(providerID),
+				filter.HasNodeID[flow.Identity](providerID),
 				item.ExtraSelector,
 			))
 			if len(overlap) == 0 {
@@ -319,15 +346,22 @@ func (e *Engine) dispatchRequest() (bool, error) {
 
 		// if no provider has been chosen yet, choose from restricted set
 		// NOTE: a single item can not permanently block requests going
-		// out when no providers are available for it, because the map
-		// iteration is random and will skip the item most of the times
+		// out when no providers are available for it, because the iteration
+		// order is random and will skip the item most of the times
 		// when other items are available
 		if providerID == flow.ZeroID {
-			providers = providers.Filter(item.ExtraSelector)
-			if len(providers) == 0 {
-				return false, fmt.Errorf("no valid providers available")
+			filteredProviders := providers.Filter(item.ExtraSelector)
+			if len(filteredProviders) == 0 {
+				return false, fmt.Errorf("no valid providers available for item %s, total providers: %v", entityID.String(), len(providers))
 			}
-			providerID = providers.Sample(1)[0].NodeID
+			// ramdonly select a provider from the filtered set
+			// to send as many item requests as possible.
+			id, err := filteredProviders.Sample(1)
+			if err != nil {
+				return false, fmt.Errorf("sampling failed: %w", err)
+			}
+			providerID = id[0].NodeID
+			providers = filteredProviders
 		}
 
 		// add item to list and set retry parameters
@@ -348,8 +382,6 @@ func (e *Engine) dispatchRequest() (bool, error) {
 			item.RetryAfter = e.cfg.RetryMaximum
 		}
 
-		e.log.Debug().Hex("entity", logging.ID(entityID)).Msg("selected entity")
-
 		// if we reached the maximum size for a batch, bail
 		if uint(len(entityIDs)) >= e.cfg.BatchThreshold {
 			break
@@ -361,9 +393,14 @@ func (e *Engine) dispatchRequest() (bool, error) {
 		return false, nil
 	}
 
+	nonce, err := rand.Uint64()
+	if err != nil {
+		return false, fmt.Errorf("nonce generation failed: %w", err)
+	}
+
 	// create a batch request, send it and store it for reference
 	req := &messages.EntityRequest{
-		Nonce:     rand.Uint64(),
+		Nonce:     nonce,
 		EntityIDs: entityIDs,
 	}
 
@@ -380,18 +417,9 @@ func (e *Engine) dispatchRequest() (bool, error) {
 
 	err = e.con.Unicast(req, providerID)
 	if err != nil {
-		return true, fmt.Errorf("could not send request: %w", err)
+		return true, fmt.Errorf("could not send request for entities %v: %w", logging.IDs(entityIDs), err)
 	}
 	e.requests[req.Nonce] = req
-
-	if e.log.Debug().Enabled() {
-		e.log.Debug().
-			Hex("provider", logging.ID(providerID)).
-			Uint64("nonce", req.Nonce).
-			Strs("entities", logging.IDs(entityIDs)).
-			TimeDiff("duration", time.Now(), requestStart).
-			Msg("entity request sent")
-	}
 
 	// NOTE: we forget about requests after the expiry of the shortest retry time
 	// from the entities in the list; this means that we purge requests aggressively.
@@ -406,6 +434,14 @@ func (e *Engine) dispatchRequest() (bool, error) {
 		delete(e.requests, req.Nonce)
 	}()
 
+	if e.log.Debug().Enabled() {
+		e.log.Debug().
+			Hex("provider", logging.ID(providerID)).
+			Uint64("nonce", req.Nonce).
+			Strs("entities", logging.IDs(entityIDs)).
+			TimeDiff("duration", time.Now(), requestStart).
+			Msg("entity request sent")
+	}
 	e.metrics.MessageSent(e.channel.String(), metrics.MessageEntityRequest)
 
 	return true, nil
@@ -417,9 +453,6 @@ func (e *Engine) process(originID flow.Identifier, message interface{}) error {
 	e.metrics.MessageReceived(e.channel.String(), metrics.MessageEntityResponse)
 	defer e.metrics.MessageHandled(e.channel.String(), metrics.MessageEntityResponse)
 
-	e.unit.Lock()
-	defer e.unit.Unlock()
-
 	switch msg := message.(type) {
 	case *messages.EntityResponse:
 		return e.onEntityResponse(originID, msg)
@@ -429,13 +462,16 @@ func (e *Engine) process(originID flow.Identifier, message interface{}) error {
 }
 
 func (e *Engine) onEntityResponse(originID flow.Identifier, res *messages.EntityResponse) error {
+	lg := e.log.With().Str("origin_id", originID.String()).Uint64("nonce", res.Nonce).Logger()
+
+	lg.Debug().Strs("entity_ids", flow.IdentifierList(res.EntityIDs).Strings()).Msg("entity response received")
 
 	if e.cfg.ValidateStaking {
 
 		// check that the response comes from a valid provider
 		providers, err := e.state.Final().Identities(filter.And(
 			e.selector,
-			filter.HasNodeID(originID),
+			filter.HasNodeID[flow.Identity](originID),
 		))
 		if err != nil {
 			return fmt.Errorf("could not get providers: %w", err)
@@ -452,6 +488,9 @@ func (e *Engine) onEntityResponse(originID flow.Identifier, res *messages.Entity
 			Uint64("nonce", res.Nonce).
 			Msg("onEntityResponse entries received")
 	}
+
+	e.unit.Lock()
+	defer e.unit.Unlock()
 
 	// build a list of needed entities; if not available, process anyway,
 	// but in that case we can't re-queue missing items
@@ -479,6 +518,7 @@ func (e *Engine) onEntityResponse(originID flow.Identifier, res *messages.Entity
 		// the entity might already have been returned in another response
 		item, exists := e.items[entityID]
 		if !exists {
+			lg.Debug().Hex("entity_id", logging.ID(entityID)).Msg("entity not in items skipping")
 			continue
 		}
 
@@ -493,10 +533,10 @@ func (e *Engine) onEntityResponse(originID flow.Identifier, res *messages.Entity
 			actualEntityID := entity.ID()
 			// validate that we got correct entity, exactly what we were expecting
 			if entityID != actualEntityID {
-				e.log.Error().
-					Hex("origin", logging.ID(originID)).
+				lg.Error().
 					Hex("stated_entity_id", logging.ID(entityID)).
 					Hex("provided_entity", logging.ID(actualEntityID)).
+					Bool(logging.KeySuspicious, true).
 					Msg("provided entity does not match stated ID")
 				continue
 			}

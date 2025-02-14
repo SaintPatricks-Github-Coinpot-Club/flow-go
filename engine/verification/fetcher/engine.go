@@ -12,6 +12,7 @@ import (
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/model/flow/filter"
 	"github.com/onflow/flow-go/model/verification"
+	"github.com/onflow/flow-go/model/verification/convert"
 	"github.com/onflow/flow-go/module"
 	"github.com/onflow/flow-go/module/mempool"
 	"github.com/onflow/flow-go/module/trace"
@@ -34,7 +35,6 @@ import (
 // to the verifier engine.
 type Engine struct {
 	// common
-	unit  *engine.Unit
 	state protocol.State // used to verify the origin ID of chunk data response, and sealing status.
 
 	// monitoring
@@ -53,6 +53,8 @@ type Engine struct {
 	verifier              network.Engine            // used to push verifiable chunk down the verification pipeline.
 	requester             ChunkDataPackRequester    // used to request chunk data packs from network.
 	chunkConsumerNotifier module.ProcessingNotifier // used to notify chunk consumer that it is done processing a chunk.
+
+	stopAtHeight uint64
 }
 
 func New(
@@ -67,9 +69,9 @@ func New(
 	results storage.ExecutionResults,
 	receipts storage.ExecutionReceipts,
 	requester ChunkDataPackRequester,
+	stopAtHeight uint64,
 ) *Engine {
 	e := &Engine{
-		unit:          engine.NewUnit(),
 		metrics:       metrics,
 		tracer:        tracer,
 		log:           log.With().Str("engine", "fetcher").Logger(),
@@ -81,6 +83,7 @@ func New(
 		results:       results,
 		receipts:      receipts,
 		requester:     requester,
+		stopAtHeight:  stopAtHeight,
 	}
 
 	e.requester.WithChunkDataPackHandler(e)
@@ -100,16 +103,12 @@ func (e *Engine) Ready() <-chan struct{} {
 	if e.chunkConsumerNotifier == nil {
 		e.log.Fatal().Msg("missing chunk consumer notifier callback in verification fetcher engine")
 	}
-	return e.unit.Ready(func() {
-		<-e.requester.Ready()
-	})
+	return e.requester.Ready()
 }
 
 // Done terminates the engine and returns a channel that is closed when the termination is done
 func (e *Engine) Done() <-chan struct{} {
-	return e.unit.Done(func() {
-		<-e.requester.Done()
-	})
+	return e.requester.Done()
 }
 
 // ProcessAssignedChunk is the entry point of fetcher engine.
@@ -165,10 +164,9 @@ func (e *Engine) ProcessAssignedChunk(locator *chunks.Locator) {
 // processAssignedChunkWithTracing encapsulates the logic of processing assigned chunk with tracing enabled.
 func (e *Engine) processAssignedChunkWithTracing(chunk *flow.Chunk, result *flow.ExecutionResult, chunkLocatorID flow.Identifier) (bool, uint64, error) {
 
-	span, _, isSampled := e.tracer.StartBlockSpan(e.unit.Ctx(), result.BlockID, trace.VERProcessAssignedChunk)
-	if isSampled {
-		span.SetAttributes(attribute.Int("collection_index", int(chunk.CollectionIndex)))
-	}
+	// We don't have any existing information and don't need cancellation, so use a background (empty) context
+	span, _ := e.tracer.StartBlockSpan(context.Background(), result.BlockID, trace.VERProcessAssignedChunk)
+	span.SetAttributes(attribute.Int("collection_index", int(chunk.CollectionIndex)))
 	defer span.End()
 
 	requested, blockHeight, err := e.processAssignedChunk(chunk, result, chunkLocatorID)
@@ -186,6 +184,13 @@ func (e *Engine) processAssignedChunk(chunk *flow.Chunk, result *flow.ExecutionR
 		return false, 0, fmt.Errorf("could not determine whether block has been sealed: %w", err)
 	}
 	if sealed {
+		e.chunkConsumerNotifier.Notify(chunkLocatorID) // tells consumer that we are done with this chunk.
+		return false, blockHeight, nil
+	}
+
+	// skip chunk if it verifies a block at or above stop height
+	if e.stopAtHeight > 0 && blockHeight >= e.stopAtHeight {
+		e.log.Warn().Msgf("Skipping chunk %s - height  %d at or above stop height requested (%d)", chunkID, blockHeight, e.stopAtHeight)
 		e.chunkConsumerNotifier.Notify(chunkLocatorID) // tells consumer that we are done with this chunk.
 		return false, blockHeight, nil
 	}
@@ -250,10 +255,10 @@ func (e *Engine) HandleChunkDataPack(originID flow.Identifier, response *verific
 		Uint64("block_height", status.BlockHeight).
 		Hex("result_id", logging.ID(resultID)).
 		Uint64("chunk_index", status.ChunkIndex).
-		Bool("system_chunk", IsSystemChunk(status.ChunkIndex, status.ExecutionResult)).
+		Bool("system_chunk", convert.IsSystemChunk(status.ChunkIndex, status.ExecutionResult)).
 		Logger()
 
-	span, ctx, _ := e.tracer.StartBlockSpan(context.Background(), status.ExecutionResult.BlockID, trace.VERFetcherHandleChunkDataPack)
+	span, ctx := e.tracer.StartBlockSpan(context.Background(), status.ExecutionResult.BlockID, trace.VERFetcherHandleChunkDataPack)
 	defer span.End()
 
 	processed, err := e.handleChunkDataPackWithTracing(ctx, originID, status, response.Cdp)
@@ -404,7 +409,7 @@ func (e Engine) validateCollectionID(
 	result *flow.ExecutionResult,
 	chunk *flow.Chunk) error {
 
-	if IsSystemChunk(chunk.Index, result) {
+	if convert.IsSystemChunk(chunk.Index, result) {
 		return e.validateSystemChunkCollection(chunkDataPack)
 	}
 
@@ -517,8 +522,8 @@ func (e *Engine) pushToVerifier(chunk *flow.Chunk,
 	if err != nil {
 		return fmt.Errorf("could not get block: %w", err)
 	}
-
-	vchunk, err := e.makeVerifiableChunkData(chunk, header, result, chunkDataPack)
+	snapshot := e.state.AtBlockID(header.ID())
+	vchunk, err := e.makeVerifiableChunkData(chunk, header, snapshot, result, chunkDataPack)
 	if err != nil {
 		return fmt.Errorf("could not verify chunk: %w", err)
 	}
@@ -536,32 +541,18 @@ func (e *Engine) pushToVerifier(chunk *flow.Chunk,
 // chunk data to verify it.
 func (e *Engine) makeVerifiableChunkData(chunk *flow.Chunk,
 	header *flow.Header,
+	snapshot protocol.Snapshot,
 	result *flow.ExecutionResult,
 	chunkDataPack *flow.ChunkDataPack,
 ) (*verification.VerifiableChunkData, error) {
 
-	// system chunk is the last chunk
-	isSystemChunk := IsSystemChunk(chunk.Index, result)
-
-	endState, err := EndStateCommitment(result, chunk.Index, isSystemChunk)
-	if err != nil {
-		return nil, fmt.Errorf("could not compute end state of chunk: %w", err)
-	}
-
-	transactionOffset, err := TransactionOffsetForChunk(result.Chunks, chunk.Index)
-	if err != nil {
-		return nil, fmt.Errorf("cannot compute transaction offset for chunk: %w", err)
-	}
-
-	return &verification.VerifiableChunkData{
-		IsSystemChunk:     isSystemChunk,
-		Chunk:             chunk,
-		Header:            header,
-		Result:            result,
-		ChunkDataPack:     chunkDataPack,
-		EndState:          endState,
-		TransactionOffset: transactionOffset,
-	}, nil
+	return convert.FromChunkDataPack(
+		chunk,
+		chunkDataPack,
+		header,
+		snapshot,
+		result,
+	)
 }
 
 // requestChunkDataPack creates and dispatches a chunk data pack request to the requester engine.
@@ -576,7 +567,7 @@ func (e *Engine) requestChunkDataPack(chunkIndex uint64, chunkID flow.Identifier
 		return fmt.Errorf("could not get header for block: %x", blockID)
 	}
 
-	allExecutors, err := e.state.AtBlockID(blockID).Identities(filter.HasRole(flow.RoleExecution))
+	allExecutors, err := e.state.AtBlockID(blockID).Identities(filter.HasRole[flow.Identity](flow.RoleExecution))
 	if err != nil {
 		return fmt.Errorf("could not fetch execution node ids at block %x: %w", blockID, err)
 	}
@@ -649,43 +640,4 @@ func executorsOf(receipts []*flow.ExecutionReceipt, resultID flow.Identifier) (f
 	}
 
 	return agrees, disagrees
-}
-
-// EndStateCommitment computes the end state of the given chunk.
-func EndStateCommitment(result *flow.ExecutionResult, chunkIndex uint64, systemChunk bool) (flow.StateCommitment, error) {
-	var endState flow.StateCommitment
-	if systemChunk {
-		var err error
-		// last chunk in a result is the system chunk and takes final state commitment
-		endState, err = result.FinalStateCommitment()
-		if err != nil {
-			return flow.DummyStateCommitment, fmt.Errorf("can not read final state commitment, likely a bug:%w", err)
-		}
-	} else {
-		// any chunk except last takes the subsequent chunk's start state
-		endState = result.Chunks[chunkIndex+1].StartState
-	}
-
-	return endState, nil
-}
-
-// TransactionOffsetForChunk calculates transaction offset for a given chunk which is the index of the first
-// transaction of this chunk within the whole block
-func TransactionOffsetForChunk(chunks flow.ChunkList, chunkIndex uint64) (uint32, error) {
-	if int(chunkIndex) > len(chunks)-1 {
-		return 0, fmt.Errorf("chunk list out of bounds, len %d asked for chunk %d", len(chunks), chunkIndex)
-	}
-	var offset uint32 = 0
-	for i := 0; i < int(chunkIndex); i++ {
-		offset += uint32(chunks[i].NumberOfTransactions)
-	}
-	return offset, nil
-}
-
-// IsSystemChunk returns true if `chunkIndex` points to a system chunk in `result`.
-// Otherwise, it returns false.
-// In the current version, a chunk is a system chunk if it is the last chunk of the
-// execution result.
-func IsSystemChunk(chunkIndex uint64, result *flow.ExecutionResult) bool {
-	return chunkIndex == uint64(len(result.Chunks)-1)
 }

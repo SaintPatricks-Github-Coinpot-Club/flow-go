@@ -3,11 +3,11 @@ package protocol
 import (
 	"fmt"
 
-	"github.com/onflow/flow-go/module/signature"
+	"github.com/onflow/crypto"
 
-	"github.com/onflow/flow-go/crypto"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/model/flow/filter"
+	"github.com/onflow/flow-go/module/signature"
 )
 
 // ToEpochSetup converts an Epoch interface instance to the underlying concrete
@@ -33,6 +33,14 @@ func ToEpochSetup(epoch Epoch) (*flow.EpochSetup, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not get epoch dkg final views: %w", err)
 	}
+	targetDuration, err := epoch.TargetDuration()
+	if err != nil {
+		return nil, fmt.Errorf("could not get target duration: %w", err)
+	}
+	targetEndTime, err := epoch.TargetEndTime()
+	if err != nil {
+		return nil, fmt.Errorf("could not get target end time: %w", err)
+	}
 	participants, err := epoch.InitialIdentities()
 	if err != nil {
 		return nil, fmt.Errorf("could not get epoch participants: %w", err)
@@ -57,6 +65,8 @@ func ToEpochSetup(epoch Epoch) (*flow.EpochSetup, error) {
 		Participants:       participants,
 		Assignments:        assignments,
 		RandomSource:       randomSource,
+		TargetDuration:     targetDuration,
+		TargetEndTime:      targetEndTime,
 	}
 	return setup, nil
 }
@@ -66,7 +76,7 @@ func ToEpochSetup(epoch Epoch) (*flow.EpochSetup, error) {
 // Error returns:
 // * protocol.ErrNoPreviousEpoch - if the epoch represents a previous epoch which does not exist.
 // * protocol.ErrNextEpochNotSetup - if the epoch represents a next epoch which has not been set up.
-// * protocol.ErrEpochNotCommitted - if the epoch has not been committed.
+// * protocol.ErrNextEpochNotCommitted - if the epoch has not been committed.
 // * state.ErrUnknownSnapshotReference - if the epoch is queried from an unresolvable snapshot.
 func ToEpochCommit(epoch Epoch) (*flow.EpochCommit, error) {
 	counter, err := epoch.Counter()
@@ -123,7 +133,7 @@ func ToEpochCommit(epoch Epoch) (*flow.EpochCommit, error) {
 // participant keys from the DKG.
 // All errors indicate inconsistent or invalid inputs.
 // No errors are expected during normal operation.
-func GetDKGParticipantKeys(dkg DKG, participants flow.IdentityList) ([]crypto.PublicKey, error) {
+func GetDKGParticipantKeys(dkg DKG, participants flow.IdentitySkeletonList) ([]crypto.PublicKey, error) {
 
 	keys := make([]crypto.PublicKey, 0, len(participants))
 	for i, identity := range participants {
@@ -146,38 +156,11 @@ func GetDKGParticipantKeys(dkg DKG, participants flow.IdentityList) ([]crypto.Pu
 	return keys, nil
 }
 
-// ToDKGParticipantLookup computes the nodeID -> DKGParticipant lookup for a
-// DKG instance. The participants must exactly match the DKG instance configuration.
-// All errors indicate inconsistent or invalid inputs.
-// No errors are expected during normal operation.
-func ToDKGParticipantLookup(dkg DKG, participants flow.IdentityList) (map[flow.Identifier]flow.DKGParticipant, error) {
-
-	lookup := make(map[flow.Identifier]flow.DKGParticipant)
-	for _, identity := range participants {
-
-		index, err := dkg.Index(identity.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("could not get index (node=%x): %w", identity.NodeID, err)
-		}
-		key, err := dkg.KeyShare(identity.NodeID)
-		if err != nil {
-			return nil, fmt.Errorf("could not get key share (node=%x): %w", identity.NodeID, err)
-		}
-
-		lookup[identity.NodeID] = flow.DKGParticipant{
-			Index:    index,
-			KeyShare: key,
-		}
-	}
-
-	return lookup, nil
-}
-
 // DKGPhaseViews returns the DKG final phase views for an epoch.
 // Error returns:
 // * protocol.ErrNoPreviousEpoch - if the epoch represents a previous epoch which does not exist.
 // * protocol.ErrNextEpochNotSetup - if the epoch represents a next epoch which has not been set up.
-// * protocol.ErrEpochNotCommitted - if the epoch has not been committed.
+// * protocol.ErrNextEpochNotCommitted - if the epoch has not been committed.
 // * state.ErrUnknownSnapshotReference - if the epoch is queried from an unresolvable snapshot.
 func DKGPhaseViews(epoch Epoch) (phase1FinalView uint64, phase2FinalView uint64, phase3FinalView uint64, err error) {
 	phase1FinalView, err = epoch.DKGPhase1FinalView()

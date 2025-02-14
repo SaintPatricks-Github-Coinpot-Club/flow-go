@@ -12,49 +12,54 @@ import (
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module"
 	"github.com/onflow/flow-go/module/blobs"
+	"github.com/onflow/flow-go/module/executiondatasync/tracker"
 	"github.com/onflow/flow-go/network"
+	"github.com/onflow/flow-go/storage"
 )
-
-// BlobSizeLimitExceededError is returned when a blob exceeds the maximum size allowed.
-type BlobSizeLimitExceededError struct {
-	cid cid.Cid
-}
-
-func (e *BlobSizeLimitExceededError) Error() string {
-	return fmt.Sprintf("blob %v exceeds maximum blob size", e.cid.String())
-}
 
 // Downloader is used to download execution data blobs from the network via a blob service.
 type Downloader interface {
 	module.ReadyDoneAware
-
-	// Download downloads and returns a Block Execution Data from the network.
-	// The returned error will be:
-	// - MalformedDataError if some level of the blob tree cannot be properly deserialized
-	// - BlobNotFoundError if some CID in the blob tree could not be found from the blob service
-	// - BlobSizeLimitExceededError if some blob in the blob tree exceeds the maximum allowed size
-	Download(ctx context.Context, executionDataID flow.Identifier) (*BlockExecutionData, error)
+	ExecutionDataGetter
+	ProcessedHeightRecorder
 }
 
+var _ Downloader = (*downloader)(nil)
+var _ ProcessedHeightRecorder = (*downloader)(nil)
+
 type downloader struct {
+	ProcessedHeightRecorder
 	blobService network.BlobService
 	maxBlobSize int
 	serializer  Serializer
+	storage     tracker.Storage
+	headers     storage.Headers
 }
 
 type DownloaderOption func(*downloader)
 
+// WithSerializer configures the serializer for the downloader
 func WithSerializer(serializer Serializer) DownloaderOption {
 	return func(d *downloader) {
 		d.serializer = serializer
 	}
 }
 
+// WithExecutionDataTracker configures the execution data tracker and the storage headers for the downloader
+func WithExecutionDataTracker(storage tracker.Storage, headers storage.Headers) DownloaderOption {
+	return func(d *downloader) {
+		d.storage = storage
+		d.headers = headers
+	}
+}
+
+// NewDownloader creates a new Downloader instance
 func NewDownloader(blobService network.BlobService, opts ...DownloaderOption) *downloader {
 	d := &downloader{
-		blobService,
-		DefaultMaxBlobSize,
-		DefaultSerializer,
+		blobService:             blobService,
+		maxBlobSize:             DefaultMaxBlobSize,
+		serializer:              DefaultSerializer,
+		ProcessedHeightRecorder: NewProcessedHeightRecorderManager(0),
 	}
 
 	for _, opt := range opts {
@@ -64,19 +69,23 @@ func NewDownloader(blobService network.BlobService, opts ...DownloaderOption) *d
 	return d
 }
 
+// Ready returns a channel that will be closed when the downloader is ready to be used
 func (d *downloader) Ready() <-chan struct{} {
 	return d.blobService.Ready()
 }
+
+// Done returns a channel that will be closed when the downloader is finished shutting down
 func (d *downloader) Done() <-chan struct{} {
 	return d.blobService.Done()
 }
 
-// Download downloads a blob tree identified by executionDataID from the network and returns the deserialized BlockExecutionData struct
-// During normal operation, the returned error will be:
-// - MalformedDataError if some level of the blob tree cannot be properly deserialized
+// Get downloads a blob tree identified by executionDataID from the network and returns the deserialized BlockExecutionData struct
+//
+// Expected errors during normal operations:
 // - BlobNotFoundError if some CID in the blob tree could not be found from the blob service
+// - MalformedDataError if some level of the blob tree cannot be properly deserialized
 // - BlobSizeLimitExceededError if some blob in the blob tree exceeds the maximum allowed size
-func (d *downloader) Download(ctx context.Context, executionDataID flow.Identifier) (*BlockExecutionData, error) {
+func (d *downloader) Get(ctx context.Context, executionDataID flow.Identifier) (*BlockExecutionData, error) {
 	blobGetter := d.blobService.GetSession(ctx)
 
 	// First, download the root execution data record which contains a list of chunk execution data
@@ -90,12 +99,15 @@ func (d *downloader) Download(ctx context.Context, executionDataID flow.Identifi
 
 	// Next, download each of the chunk execution data blobs
 	chunkExecutionDatas := make([]*ChunkExecutionData, len(edRoot.ChunkExecutionDataIDs))
+	// Execution data cids
+	var edCids = []cid.Cid{flow.IdToCid(executionDataID)}
+
 	for i, chunkDataID := range edRoot.ChunkExecutionDataIDs {
 		i := i
 		chunkDataID := chunkDataID
 
 		g.Go(func() error {
-			ced, err := d.getChunkExecutionData(
+			ced, cids, err := d.getChunkExecutionData(
 				gCtx,
 				chunkDataID,
 				blobGetter,
@@ -106,6 +118,7 @@ func (d *downloader) Download(ctx context.Context, executionDataID flow.Identifi
 			}
 
 			chunkExecutionDatas[i] = ced
+			edCids = append(edCids, cids...)
 
 			return nil
 		})
@@ -113,6 +126,11 @@ func (d *downloader) Download(ctx context.Context, executionDataID flow.Identifi
 
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	err = d.trackBlobs(edRoot.BlockID, edCids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to track blob: %w", err)
 	}
 
 	// Finally, recombine data into original record.
@@ -124,11 +142,18 @@ func (d *downloader) Download(ctx context.Context, executionDataID flow.Identifi
 	return bed, nil
 }
 
+// getExecutionDataRoot downloads the root execution data record from the network and returns the
+// deserialized flow.BlockExecutionDataRoot struct.
+//
+// Expected errors during normal operations:
+// - BlobNotFoundError if the root blob could not be found from the blob service
+// - MalformedDataError if the root blob cannot be properly deserialized
+// - BlobSizeLimitExceededError if the root blob exceeds the maximum allowed size
 func (d *downloader) getExecutionDataRoot(
 	ctx context.Context,
 	rootID flow.Identifier,
 	blobGetter network.BlobGetter,
-) (*BlockExecutionDataRoot, error) {
+) (*flow.BlockExecutionDataRoot, error) {
 	rootCid := flow.IdToCid(rootID)
 
 	blob, err := blobGetter.GetBlob(ctx, rootCid)
@@ -151,7 +176,7 @@ func (d *downloader) getExecutionDataRoot(
 		return nil, NewMalformedDataError(err)
 	}
 
-	edRoot, ok := v.(*BlockExecutionDataRoot)
+	edRoot, ok := v.(*flow.BlockExecutionDataRoot)
 	if !ok {
 		return nil, NewMalformedDataError(fmt.Errorf("execution data root blob does not deserialize to a BlockExecutionDataRoot, got %T instead", v))
 	}
@@ -159,37 +184,89 @@ func (d *downloader) getExecutionDataRoot(
 	return edRoot, nil
 }
 
+// getChunkExecutionData downloads a chunk execution data blob from the network and returns the
+// deserialized ChunkExecutionData struct with list of cids from all levels of the blob tree.
+//
+// Expected errors during normal operations:
+// - context.Canceled or context.DeadlineExceeded if the context is canceled or times out
+// - BlobNotFoundError if the root blob could not be found from the blob service
+// - MalformedDataError if the root blob cannot be properly deserialized
+// - BlobSizeLimitExceededError if the root blob exceeds the maximum allowed size
 func (d *downloader) getChunkExecutionData(
 	ctx context.Context,
 	chunkExecutionDataID cid.Cid,
 	blobGetter network.BlobGetter,
-) (*ChunkExecutionData, error) {
+) (*ChunkExecutionData, []cid.Cid, error) {
 	cids := []cid.Cid{chunkExecutionDataID}
+	cidsFromAllLevels := []cid.Cid{chunkExecutionDataID}
 
 	// iteratively process each level of the blob tree until a ChunkExecutionData is returned or an
 	// error is encountered
 	for i := 0; ; i++ {
 		v, err := d.getBlobs(ctx, blobGetter, cids)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get level %d of blob tree: %w", i, err)
+			return nil, nil, fmt.Errorf("failed to get level %d of blob tree: %w", i, err)
 		}
 
 		switch v := v.(type) {
 		case *ChunkExecutionData:
-			return v, nil
+			return v, cidsFromAllLevels, nil
 		case *[]cid.Cid:
+			cidsFromAllLevels = append(cidsFromAllLevels, *v...)
 			cids = *v
 		default:
-			return nil, NewMalformedDataError(fmt.Errorf("blob tree contains unexpected type %T at level %d", v, i))
+			return nil, nil, NewMalformedDataError(fmt.Errorf("blob tree contains unexpected type %T at level %d", v, i))
 		}
 	}
 }
 
+// trackBlobs updates the storage to track the provided CIDs for a given block.
+// This is used to ensure that the blobs can be pruned later.
+//
+// Parameters:
+// - blockID: The identifier of the block to which the blobs belong.
+// - cids: CIDs to be tracked.
+//
+// No errors are expected during normal operations.
+func (d *downloader) trackBlobs(blockID flow.Identifier, cids []cid.Cid) error {
+	if d.storage == nil || d.headers == nil {
+		return nil
+	}
+
+	return d.storage.Update(func(trackBlobs tracker.TrackBlobsFn) error {
+		header, err := d.headers.ByBlockID(blockID)
+		if err != nil {
+			return err
+		}
+
+		// track new blobs so that they can be pruned later
+		err = trackBlobs(header.Height, cids...)
+		if err != nil {
+			return err
+		}
+
+		d.OnBlockProcessed(header.Height)
+
+		return nil
+	})
+}
+
 // getBlobs gets the given CIDs from the blobservice, reassembles the blobs, and deserializes the reassembled data into an object.
+//
+// Expected errors during normal operations:
+// - context.Canceled or context.DeadlineExceeded if the context is canceled or times out
+// - BlobNotFoundError if the root blob could not be found from the blob service
+// - MalformedDataError if the root blob cannot be properly deserialized
+// - BlobSizeLimitExceededError if the root blob exceeds the maximum allowed size
 func (d *downloader) getBlobs(ctx context.Context, blobGetter network.BlobGetter, cids []cid.Cid) (interface{}, error) {
+	// this uses an optimization to deserialize the data in a streaming fashion as it is received
+	// from the network, reducing the amount of memory required to deserialize large objects.
 	blobCh, errCh := d.retrieveBlobs(ctx, blobGetter, cids)
 	bcr := blobs.NewBlobChannelReader(blobCh)
+
 	v, deserializeErr := d.serializer.Deserialize(bcr)
+
+	// blocks until all blobs have been retrieved or an error is encountered
 	err := <-errCh
 
 	if err != nil {
@@ -204,6 +281,13 @@ func (d *downloader) getBlobs(ctx context.Context, blobGetter network.BlobGetter
 }
 
 // retrieveBlobs asynchronously retrieves the blobs for the given CIDs with the given BlobGetter.
+// Blobs corresponding to the requested CIDs are returned in order on the response channel.
+//
+// Expected errors during normal operations:
+// - context.Canceled or context.DeadlineExceeded if the context is canceled or times out
+// - BlobNotFoundError if the root blob could not be found from the blob service
+// - MalformedDataError if the root blob cannot be properly deserialized
+// - BlobSizeLimitExceededError if the root blob exceeds the maximum allowed size
 func (d *downloader) retrieveBlobs(parent context.Context, blobGetter network.BlobGetter, cids []cid.Cid) (<-chan blobs.Blob, <-chan error) {
 	blobsOut := make(chan blobs.Blob, len(cids))
 	errCh := make(chan error, 1)
@@ -223,8 +307,10 @@ func (d *downloader) retrieveBlobs(parent context.Context, blobGetter network.Bl
 		cachedBlobs := make(map[cid.Cid]blobs.Blob)
 		cidCounts := make(map[cid.Cid]int) // used to account for duplicate CIDs
 
+		// record the number of times each CID appears in the list. this is later used to determine
+		// when it's safe to delete cached blobs during processing
 		for _, c := range cids {
-			cidCounts[c] += 1
+			cidCounts[c]++
 		}
 
 		// for each cid, find the corresponding blob from the incoming blob channel and send it to
@@ -244,7 +330,8 @@ func (d *downloader) retrieveBlobs(parent context.Context, blobGetter network.Bl
 				}
 			}
 
-			cidCounts[c] -= 1
+			// remove the blob from the cache if it's no longer needed
+			cidCounts[c]--
 
 			if cidCounts[c] == 0 {
 				delete(cachedBlobs, c)
@@ -260,12 +347,20 @@ func (d *downloader) retrieveBlobs(parent context.Context, blobGetter network.Bl
 
 // findBlob retrieves blobs from the given channel, caching them along the way, until it either
 // finds the target blob or exhausts the channel.
+//
+// This is necessary to ensure blobs can be reassembled in order from the underlying blobservice
+// which provides no guarantees for blob order on the response channel.
+//
+// Expected errors during normal operations:
+// - BlobNotFoundError if the root blob could not be found from the blob service
+// - BlobSizeLimitExceededError if the root blob exceeds the maximum allowed size
 func (d *downloader) findBlob(
 	blobChan <-chan blobs.Blob,
 	target cid.Cid,
 	cache map[cid.Cid]blobs.Blob,
 ) (blobs.Blob, error) {
-	// Note: blobs are returned as they are found, in no particular order
+	// pull blobs off the blob channel until the target blob is found or the channel is closed
+	// Note: blobs are returned on the blob channel as they are found, in no particular order
 	for blob := range blobChan {
 		// check blob size
 		blobSize := len(blob.RawData())

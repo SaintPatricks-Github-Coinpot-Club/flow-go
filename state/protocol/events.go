@@ -8,8 +8,18 @@ import (
 // can be propagated to other components via an implementation of this interface.
 // Collectively, these are referred to as "Protocol Events".
 //
-// Protocol events are guaranteed to be delivered at least once. Subscribers must
-// handle multiple deliveries.
+// Protocol events are delivered immediately after the database transaction
+// committing the corresponding state change completes successfully.
+// This means that events are delivered exactly once, while the system is running.
+// Events may not be delivered during crashes and restarts, but any missed events
+// are guaranteed to be reflected in the Protocol State upon restarting.
+// Components consuming protocol events which cannot tolerate missed events
+// must implement initialization logic which accounts for any missed events.
+//
+// EXAMPLE:
+// Suppose block A is finalized at height 100. If the BlockFinalized(A) event is
+// dropped due to a crash, then when the node restarts, the latest finalized block
+// in the Protocol State is guaranteed to be A.
 //
 // CAUTION: Protocol event subscriber callbacks are invoked synchronously in the
 // critical path of protocol state mutations. Most subscribers should immediately
@@ -19,18 +29,19 @@ import (
 // NOTE: the epoch-related callbacks are only called once the fork containing
 // the relevant event has been finalized.
 type Consumer interface {
-
 	// BlockFinalized is called when a block is finalized.
 	// Formally, this callback is informationally idempotent. I.e. the consumer
 	// of this callback must handle repeated calls for the same block.
 	BlockFinalized(block *flow.Header)
 
-	// BlockProcessable is called when a correct block is encountered
-	// that is ready to be processed (i.e. it is connected to the finalized
-	// chain and its source of randomness is available).
+	// BlockProcessable is called when a correct block is encountered that is
+	// ready to be processed (i.e. it is connected to the finalized chain and
+	// its source of randomness is available).
+	// BlockProcessable provides the block and a certifying QC. BlockProcessable is never emitted
+	// for the root block, as the root block is always processable.
 	// Formally, this callback is informationally idempotent. I.e. the consumer
 	// of this callback must handle repeated calls for the same block.
-	BlockProcessable(block *flow.Header)
+	BlockProcessable(block *flow.Header, certifyingQC *flow.QuorumCertificate)
 
 	// EpochTransition is called when we transition to a new epoch. This is
 	// equivalent to the beginning of the new epoch's staking phase and the end
@@ -45,15 +56,14 @@ type Consumer interface {
 	// the current epoch. This is equivalent to the end of the epoch staking
 	// phase for the current epoch.
 	//
-	// Referencing the diagram below, the event is emitted when block c is incorporated.
-	// The block parameter is the first block of the epoch setup phase (block c).
+	// Referencing the diagram below, the event is emitted when block b is finalized.
+	// The block parameter is the first block of the epoch setup phase (block b).
 	//
 	// |<-- Epoch N ------------------------------------------------->|
 	// |<-- StakingPhase -->|<-- SetupPhase -->|<-- CommittedPhase -->|
 	//                    ^--- block A - this block's execution result contains an EpochSetup event
-	//                      ^--- block b - contains seal for block A
-	//                         ^--- block c - contains qc for block b, first block of Setup phase
-	//                           ^--- block d - finalizes block c, triggers EpochSetupPhaseStarted event
+	//                      ^--- block b - contains seal for block A, first block of Setup phase
+	//                         ^--- block c - finalizes block b, triggers EpochSetupPhaseStarted event
 	//
 	// NOTE: Only called once the phase transition has been finalized.
 	EpochSetupPhaseStarted(currentEpochCounter uint64, first *flow.Header)
@@ -62,17 +72,48 @@ type Consumer interface {
 	// for the current epoch. This is equivalent to the end of the epoch setup
 	// phase for the current epoch.
 	//
-	// Referencing the diagram below, the event is emitted when block f is received.
-	// The block parameter is the first block of the epoch committed phase (block f).
+	// Referencing the diagram below, the event is emitted when block e is finalized.
+	// The block parameter is the first block of the epoch committed phase (block e).
 	//
 	// |<-- Epoch N ------------------------------------------------->|
 	// |<-- StakingPhase -->|<-- SetupPhase -->|<-- CommittedPhase -->|
 	//                                       ^--- block D - this block's execution result contains an EpochCommit event
-	//                                         ^--- block e - contains seal for block D
-	//                                            ^--- block f - contains qc for block e, first block of Committed phase
-	//                                              ^--- block g - finalizes block f, triggers EpochCommittedPhaseStarted event
-	///
+	//                                         ^--- block e - contains seal for block D, first block of Committed phase
+	//                                            ^--- block f - finalizes block e, triggers EpochCommittedPhaseStarted event
 	//
 	// NOTE: Only called once the phase transition has been finalized.
 	EpochCommittedPhaseStarted(currentEpochCounter uint64, first *flow.Header)
+
+	// EpochFallbackModeTriggered is called when Epoch Fallback Mode [EFM] is triggered.
+	// EFM is triggered when an invalid or unexpected epoch-related service event is observed,
+	// or an expected service event is not observed before the epoch commitment deadline.
+	// After EFM is triggered, we drop any potentially pending but uncommitted future epoch setup.
+	// When an EpochRecover event is observed, regular epoch transitions begin again.
+	// Usually, this means we remain in the current epoch until EFM is exited.
+	// If EFM was triggered within the EpochCommitted phase, then we complete the transition
+	// to the next, already-committed epoch, then remain in that epoch until EFM is exited.
+	// Consumers can get context for handling events from:
+	//   - epochCounter is the current epoch counter at the block when EFM was triggered
+	//   - header is the block when EFM was triggered
+	//
+	// NOTE: This notification is emitted when the block triggering EFM is finalized.
+	EpochFallbackModeTriggered(epochCounter uint64, header *flow.Header)
+
+	// EpochFallbackModeExited is called when epoch fallback mode [EFM] is exited.
+	// EFM is exited when an EpochRecover service event is processed, which defines
+	// a final view for the current epoch and fully specifies the subsequent epoch.
+	// Consumers can get context for handling events from:
+	//   - epochCounter is the current epoch counter at the block when EFM was triggered
+	//   - header is the block when EFM was triggered
+	//
+	// NOTE: Only called once the block incorporating the EpochRecover is finalized.
+	EpochFallbackModeExited(epochCounter uint64, header *flow.Header)
+
+	// EpochExtended is called when a flow.EpochExtension is added to the current epoch
+	// Consumers can get context for handling events from:
+	//   - epochCounter is the current epoch counter at the block when EFM was triggered
+	//   - header is the block when EFM was triggered
+	//
+	// NOTE: This notification is emitted when the block triggering the EFM extension is finalized.
+	EpochExtended(epochCounter uint64, header *flow.Header, extension flow.EpochExtension)
 }

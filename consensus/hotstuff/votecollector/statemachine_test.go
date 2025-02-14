@@ -8,6 +8,7 @@ import (
 
 	"github.com/gammazero/workerpool"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
@@ -31,7 +32,7 @@ type StateMachineTestSuite struct {
 	suite.Suite
 
 	view             uint64
-	notifier         *mocks.Consumer
+	notifier         *mocks.VoteAggregationConsumer
 	workerPool       *workerpool.WorkerPool
 	factoryMethod    VerifyingVoteProcessorFactory
 	mockedProcessors map[flow.Identifier]*mocks.VerifyingVoteProcessor
@@ -48,9 +49,9 @@ func (s *StateMachineTestSuite) TearDownTest() {
 func (s *StateMachineTestSuite) SetupTest() {
 	s.view = 1000
 	s.mockedProcessors = make(map[flow.Identifier]*mocks.VerifyingVoteProcessor)
-	s.notifier = &mocks.Consumer{}
+	s.notifier = mocks.NewVoteAggregationConsumer(s.T())
 
-	s.factoryMethod = func(log zerolog.Logger, block *model.Proposal) (hotstuff.VerifyingVoteProcessor, error) {
+	s.factoryMethod = func(log zerolog.Logger, block *model.SignedProposal) (hotstuff.VerifyingVoteProcessor, error) {
 		if processor, found := s.mockedProcessors[block.Block.BlockID]; found {
 			return processor, nil
 		}
@@ -63,13 +64,13 @@ func (s *StateMachineTestSuite) SetupTest() {
 
 // prepareMockedProcessor prepares a mocked processor and stores it in map, later it will be used
 // to mock behavior of verifying vote processor.
-func (s *StateMachineTestSuite) prepareMockedProcessor(block *model.Block) *mocks.VerifyingVoteProcessor {
+func (s *StateMachineTestSuite) prepareMockedProcessor(proposal *model.SignedProposal) *mocks.VerifyingVoteProcessor {
 	processor := &mocks.VerifyingVoteProcessor{}
 	processor.On("Block").Return(func() *model.Block {
-		return block
+		return proposal.Block
 	}).Maybe()
 	processor.On("Status").Return(hotstuff.VoteCollectorStatusVerifying)
-	s.mockedProcessors[block.BlockID] = processor
+	s.mockedProcessors[proposal.Block.BlockID] = processor
 	return processor
 }
 
@@ -77,8 +78,8 @@ func (s *StateMachineTestSuite) prepareMockedProcessor(block *model.Block) *mock
 // when proposal processing can possibly change state of collector
 func (s *StateMachineTestSuite) TestStatus_StateTransitions() {
 	block := helper.MakeBlock(helper.WithBlockView(s.view))
-	proposal := helper.MakeProposal(helper.WithBlock(block))
-	s.prepareMockedProcessor(block)
+	proposal := helper.MakeSignedProposal(helper.WithProposal(helper.MakeProposal(helper.WithBlock(block))))
+	s.prepareMockedProcessor(proposal)
 
 	// by default, we should create in caching status
 	require.Equal(s.T(), hotstuff.VoteCollectorStatusCaching, s.collector.Status())
@@ -89,9 +90,7 @@ func (s *StateMachineTestSuite) TestStatus_StateTransitions() {
 	require.Equal(s.T(), hotstuff.VoteCollectorStatusVerifying, s.collector.Status())
 
 	// after submitting double proposal we should transfer into invalid state
-	err = s.collector.ProcessBlock(helper.MakeProposal(
-		helper.WithBlock(
-			helper.MakeBlock(helper.WithBlockView(s.view)))))
+	err = s.collector.ProcessBlock(makeSignedProposalWithView(s.view))
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), hotstuff.VoteCollectorStatusInvalid, s.collector.Status())
 }
@@ -100,13 +99,14 @@ func (s *StateMachineTestSuite) TestStatus_StateTransitions() {
 // factory are handed through (potentially wrapped), but are not replaced.
 func (s *StateMachineTestSuite) Test_FactoryErrorPropagation() {
 	factoryError := errors.New("factory error")
-	factory := func(log zerolog.Logger, block *model.Proposal) (hotstuff.VerifyingVoteProcessor, error) {
+	factory := func(log zerolog.Logger, block *model.SignedProposal) (hotstuff.VerifyingVoteProcessor, error) {
 		return nil, factoryError
 	}
 	s.collector.createVerifyingProcessor = factory
 
 	// failing to create collector has to result in error and won't change state
-	err := s.collector.ProcessBlock(helper.MakeProposal(helper.WithBlock(helper.MakeBlock(helper.WithBlockView(s.view)))))
+	proposal := makeSignedProposalWithView(s.view)
+	err := s.collector.ProcessBlock(proposal)
 	require.ErrorIs(s.T(), err, factoryError)
 	require.Equal(s.T(), hotstuff.VoteCollectorStatusCaching, s.collector.Status())
 }
@@ -114,13 +114,14 @@ func (s *StateMachineTestSuite) Test_FactoryErrorPropagation() {
 // TestAddVote_VerifyingState tests that AddVote correctly process valid and invalid votes as well
 // as repeated, invalid and double votes in verifying state
 func (s *StateMachineTestSuite) TestAddVote_VerifyingState() {
-	block := helper.MakeBlock(helper.WithBlockView(s.view))
-	proposal := helper.MakeProposal(helper.WithBlock(block))
-	processor := s.prepareMockedProcessor(block)
+	proposal := makeSignedProposalWithView(s.view)
+	block := proposal.Block
+	processor := s.prepareMockedProcessor(proposal)
 	err := s.collector.ProcessBlock(proposal)
 	require.NoError(s.T(), err)
 	s.T().Run("add-valid-vote", func(t *testing.T) {
 		vote := unittest.VoteForBlockFixture(block)
+		s.notifier.On("OnVoteProcessed", vote).Once()
 		processor.On("Process", vote).Return(nil).Once()
 		err := s.collector.AddVote(vote)
 		require.NoError(t, err)
@@ -128,6 +129,7 @@ func (s *StateMachineTestSuite) TestAddVote_VerifyingState() {
 	})
 	s.T().Run("add-double-vote", func(t *testing.T) {
 		firstVote := unittest.VoteForBlockFixture(block)
+		s.notifier.On("OnVoteProcessed", firstVote).Once()
 		processor.On("Process", firstVote).Return(nil).Once()
 		err := s.collector.AddVote(firstVote)
 		require.NoError(t, err)
@@ -149,18 +151,21 @@ func (s *StateMachineTestSuite) TestAddVote_VerifyingState() {
 	s.T().Run("add-invalid-vote", func(t *testing.T) {
 		vote := unittest.VoteForBlockFixture(block, unittest.WithVoteView(s.view))
 		processor.On("Process", vote).Return(model.NewInvalidVoteErrorf(vote, "")).Once()
-
-		s.notifier.On("OnInvalidVoteDetected", vote).Return(nil).Once()
+		s.notifier.On("OnInvalidVoteDetected", mock.Anything).Run(func(args mock.Arguments) {
+			invalidVoteErr := args.Get(0).(model.InvalidVoteError)
+			require.Equal(s.T(), vote, invalidVoteErr.Vote)
+		}).Return(nil).Once()
 		err := s.collector.AddVote(vote)
 		// in case process returns model.InvalidVoteError we should silently ignore this error
 		require.NoError(t, err)
 
 		// but should get notified about invalid vote
-		s.notifier.AssertCalled(t, "OnInvalidVoteDetected", vote)
+		s.notifier.AssertCalled(t, "OnInvalidVoteDetected", mock.Anything)
 		processor.AssertCalled(t, "Process", vote)
 	})
 	s.T().Run("add-repeated-vote", func(t *testing.T) {
 		vote := unittest.VoteForBlockFixture(block)
+		s.notifier.On("OnVoteProcessed", vote).Once()
 		processor.On("Process", vote).Return(nil).Once()
 		err := s.collector.AddVote(vote)
 		require.NoError(t, err)
@@ -197,12 +202,14 @@ func (s *StateMachineTestSuite) TestAddVote_VerifyingState() {
 // are sent to vote processor
 func (s *StateMachineTestSuite) TestProcessBlock_ProcessingOfCachedVotes() {
 	votes := 10
-	block := helper.MakeBlock(helper.WithBlockView(s.view))
-	proposal := helper.MakeProposal(helper.WithBlock(block))
-	processor := s.prepareMockedProcessor(block)
+	proposal := makeSignedProposalWithView(s.view)
+	block := proposal.Block
+	processor := s.prepareMockedProcessor(proposal)
 	for i := 0; i < votes; i++ {
 		vote := unittest.VoteForBlockFixture(block)
-		// eventually it has to be process by processor
+		// once when caching vote, and once when processing cached vote
+		s.notifier.On("OnVoteProcessed", vote).Twice()
+		// eventually it has to be processed by processor
 		processor.On("Process", vote).Return(nil).Once()
 		require.NoError(s.T(), s.collector.AddVote(vote))
 	}
@@ -218,10 +225,12 @@ func (s *StateMachineTestSuite) TestProcessBlock_ProcessingOfCachedVotes() {
 // Test_VoteProcessorErrorPropagation verifies that unexpected errors from the `VoteProcessor`
 // are propagated up the call stack (potentially wrapped), but are not replaced.
 func (s *StateMachineTestSuite) Test_VoteProcessorErrorPropagation() {
-	block := helper.MakeBlock(helper.WithBlockView(s.view))
-	processor := s.prepareMockedProcessor(block)
+	proposal := makeSignedProposalWithView(s.view)
+	block := proposal.Block
+	processor := s.prepareMockedProcessor(proposal)
 
-	err := s.collector.ProcessBlock(helper.MakeProposal(helper.WithBlock(block)))
+	err := s.collector.ProcessBlock(helper.MakeSignedProposal(
+		helper.WithProposal(helper.MakeProposal(helper.WithBlock(block)))))
 	require.NoError(s.T(), err)
 
 	unexpectedError := errors.New("some unexpected error")
@@ -235,8 +244,9 @@ func (s *StateMachineTestSuite) Test_VoteProcessorErrorPropagation() {
 // in strict ordering of arrival.
 func (s *StateMachineTestSuite) RegisterVoteConsumer() {
 	votes := 10
-	block := helper.MakeBlock(helper.WithBlockView(s.view))
-	processor := s.prepareMockedProcessor(block)
+	proposal := makeSignedProposalWithView(s.view)
+	block := proposal.Block
+	processor := s.prepareMockedProcessor(proposal)
 	expectedVotes := make([]*model.Vote, 0)
 	for i := 0; i < votes; i++ {
 		vote := unittest.VoteForBlockFixture(block)
@@ -262,4 +272,8 @@ func (s *StateMachineTestSuite) RegisterVoteConsumer() {
 	}
 
 	require.Equal(s.T(), expectedVotes, actualVotes)
+}
+
+func makeSignedProposalWithView(view uint64) *model.SignedProposal {
+	return helper.MakeSignedProposal(helper.WithProposal(helper.MakeProposal(helper.WithBlock(helper.MakeBlock(helper.WithBlockView(view))))))
 }

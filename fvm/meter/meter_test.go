@@ -8,10 +8,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onflow/cadence/runtime/common"
+	"github.com/onflow/cadence/common"
 
 	"github.com/onflow/flow-go/fvm/errors"
 	"github.com/onflow/flow-go/fvm/meter"
+	"github.com/onflow/flow-go/model/flow"
 )
 
 func TestWeightedComputationMetering(t *testing.T) {
@@ -48,11 +49,11 @@ func TestWeightedComputationMetering(t *testing.T) {
 
 		err := m.MeterComputation(0, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
 
 		err = m.MeterComputation(0, 2)
 		require.NoError(t, err)
-		require.Equal(t, uint(1+2), m.TotalComputationUsed())
+		require.Equal(t, uint64(1+2), m.TotalComputationUsed())
 
 		err = m.MeterComputation(0, 8)
 		require.Error(t, err)
@@ -85,7 +86,7 @@ func TestWeightedComputationMetering(t *testing.T) {
 
 		err := m.MeterComputation(0, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(13), m.TotalComputationUsed())
+		require.Equal(t, uint64(13), m.TotalComputationUsed())
 		require.Equal(t, uint(1), m.ComputationIntensities()[0])
 
 		err = m.MeterMemory(0, 2)
@@ -107,13 +108,56 @@ func TestWeightedComputationMetering(t *testing.T) {
 
 		err := m.MeterComputation(0, internalPrecisionMinusOne)
 		require.NoError(t, err)
-		require.Equal(t, uint(0), m.TotalComputationUsed())
+		require.Equal(t, uint64(0), m.TotalComputationUsed())
 		require.Equal(t, internalPrecisionMinusOne, m.ComputationIntensities()[0])
 
 		err = m.MeterComputation(0, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
 		require.Equal(t, uint(1<<meter.MeterExecutionInternalPrecisionBytes), m.ComputationIntensities()[0])
+	})
+
+	t.Run("check computation capacity", func(t *testing.T) {
+		m := meter.NewMeter(
+			meter.DefaultParameters().
+				WithComputationLimit(10).
+				WithComputationWeights(
+					map[common.ComputationKind]uint64{0: 1 << meter.MeterExecutionInternalPrecisionBytes}),
+		)
+
+		hasCapacity := m.ComputationAvailable(0, 1)
+		require.True(t, hasCapacity)
+
+		err := m.MeterComputation(0, 1)
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
+
+		require.True(t, m.ComputationAvailable(0, 9))
+		require.False(t, m.ComputationAvailable(0, 10))
+
+		// test a type without a weight (default zero)
+		require.True(t, m.ComputationAvailable(1, 10))
+	})
+
+	t.Run("check computation remaining", func(t *testing.T) {
+		m := meter.NewMeter(
+			meter.DefaultParameters().
+				WithComputationLimit(10).
+				WithComputationWeights(
+					map[common.ComputationKind]uint64{0: 1 << meter.MeterExecutionInternalPrecisionBytes}),
+		)
+
+		remaining := m.ComputationRemaining(0)
+		require.Equal(t, uint(10), remaining)
+
+		err := m.MeterComputation(0, 1)
+		require.NoError(t, err)
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
+
+		require.Equal(t, uint(9), m.ComputationRemaining(0))
+
+		// test a type without a weight (default zero)
+		require.Equal(t, uint(math.MaxUint), m.ComputationRemaining(1))
 	})
 
 	t.Run("merge meters", func(t *testing.T) {
@@ -130,29 +174,29 @@ func TestWeightedComputationMetering(t *testing.T) {
 		err := m.MeterComputation(compKind, 1)
 		require.NoError(t, err)
 
-		child1 := m.NewChild()
+		child1 := meter.NewMeter(m.MeterParameters)
 		err = child1.MeterComputation(compKind, 2)
 		require.NoError(t, err)
 
-		child2 := m.NewChild()
+		child2 := meter.NewMeter(m.MeterParameters)
 		err = child2.MeterComputation(compKind, 3)
 		require.NoError(t, err)
 
-		child3 := m.NewChild()
+		child3 := meter.NewMeter(m.MeterParameters)
 		err = child3.MeterComputation(compKind, 4)
 		require.NoError(t, err)
 
 		m.MergeMeter(child1)
-		require.Equal(t, uint(1+2), m.TotalComputationUsed())
+		require.Equal(t, uint64(1+2), m.TotalComputationUsed())
 		require.Equal(t, uint(1+2), m.ComputationIntensities()[compKind])
 
 		m.MergeMeter(child2)
-		require.Equal(t, uint(1+2+3), m.TotalComputationUsed())
+		require.Equal(t, uint64(1+2+3), m.TotalComputationUsed())
 		require.Equal(t, uint(1+2+3), m.ComputationIntensities()[compKind])
 
 		// merge hits limit, but is accepted.
 		m.MergeMeter(child3)
-		require.Equal(t, uint(1+2+3+4), m.TotalComputationUsed())
+		require.Equal(t, uint64(1+2+3+4), m.TotalComputationUsed())
 		require.Equal(t, uint(1+2+3+4), m.ComputationIntensities()[compKind])
 
 		// error after merge (hitting limit)
@@ -174,13 +218,13 @@ func TestWeightedComputationMetering(t *testing.T) {
 		err := m.MeterComputation(compKind, 1)
 		require.NoError(t, err)
 
-		child := m.NewChild()
+		child := meter.NewMeter(m.MeterParameters)
 		err = child.MeterComputation(compKind, 1)
 		require.NoError(t, err)
 
 		// hitting limit and ignoring it
 		m.MergeMeter(child)
-		require.Equal(t, uint(1+1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1+1), m.TotalComputationUsed())
 		require.Equal(t, uint(1+1), m.ComputationIntensities()[compKind])
 	})
 
@@ -196,7 +240,7 @@ func TestWeightedComputationMetering(t *testing.T) {
 		err := m.MeterComputation(0, 1)
 		require.NoError(t, err)
 
-		child1 := m.NewChild()
+		child1 := meter.NewMeter(m.MeterParameters)
 		err = child1.MeterComputation(0, 1)
 		require.NoError(t, err)
 
@@ -218,7 +262,7 @@ func TestWeightedComputationMetering(t *testing.T) {
 		err := m.MeterMemory(0, 1)
 		require.NoError(t, err)
 
-		child1 := m.NewChild()
+		child1 := meter.NewMeter(m.MeterParameters)
 		err = child1.MeterMemory(0, 1)
 		require.NoError(t, err)
 
@@ -248,41 +292,41 @@ func TestWeightedComputationMetering(t *testing.T) {
 		reset()
 		err := m.MeterComputation(0, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(0), m.TotalComputationUsed())
+		require.Equal(t, uint64(0), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(0, 1<<meter.MeterExecutionInternalPrecisionBytes)
 		require.NoError(t, err)
-		require.Equal(t, uint(0), m.TotalComputationUsed())
+		require.Equal(t, uint64(0), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(0, math.MaxUint32)
 		require.NoError(t, err)
-		require.Equal(t, uint(0), m.TotalComputationUsed())
+		require.Equal(t, uint64(0), m.TotalComputationUsed())
 
 		reset()
 		err = m.MeterComputation(1, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(0), m.TotalComputationUsed())
+		require.Equal(t, uint64(0), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(1, 1<<meter.MeterExecutionInternalPrecisionBytes)
 		require.NoError(t, err)
-		require.Equal(t, uint(1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(1, math.MaxUint32)
 		require.NoError(t, err)
-		require.Equal(t, uint(1<<16-1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1<<16-1), m.TotalComputationUsed())
 
 		reset()
 		err = m.MeterComputation(2, 1)
 		require.NoError(t, err)
-		require.Equal(t, uint(1), m.TotalComputationUsed())
+		require.Equal(t, uint64(1), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(2, 1<<meter.MeterExecutionInternalPrecisionBytes)
 		require.NoError(t, err)
-		require.Equal(t, uint(1<<16), m.TotalComputationUsed())
+		require.Equal(t, uint64(1<<16), m.TotalComputationUsed())
 		reset()
 		err = m.MeterComputation(2, math.MaxUint32)
 		require.NoError(t, err)
-		require.Equal(t, uint(math.MaxUint32), m.TotalComputationUsed())
+		require.Equal(t, uint64(math.MaxUint32), m.TotalComputationUsed())
 
 		reset()
 		err = m.MeterComputation(3, 1)
@@ -363,7 +407,9 @@ func TestWeightedComputationMetering(t *testing.T) {
 func TestMemoryWeights(t *testing.T) {
 	for kind := common.MemoryKindUnknown + 1; kind < common.MemoryKindLast; kind++ {
 		weight, ok := meter.DefaultMemoryWeights[kind]
-		assert.True(t, ok, fmt.Sprintf("missing weight for memory kind '%s'", kind.String()))
+		if !assert.True(t, ok, fmt.Sprintf("missing weight for memory kind '%s'", kind.String())) {
+			continue
+		}
 		assert.Greater(
 			t,
 			weight,
@@ -383,7 +429,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters(),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 		size1 := meter.GetStorageKeyValueSizeForTesting(key1, val1)
 
@@ -398,7 +444,7 @@ func TestStorageLimits(t *testing.T) {
 		require.Equal(t, meter1.TotalBytesReadFromStorage(), size1)
 
 		// first read of key2
-		key2 := meter.StorageInteractionKey{Owner: "", Key: "2"}
+		key2 := flow.NewRegisterID(flow.EmptyAddress, "2")
 		val2 := []byte{0x3, 0x2, 0x1}
 		size2 := meter.GetStorageKeyValueSizeForTesting(key2, val2)
 
@@ -412,7 +458,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters(),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 		val2 := []byte{0x1, 0x2, 0x3, 0x4}
 
@@ -427,7 +473,7 @@ func TestStorageLimits(t *testing.T) {
 		require.Equal(t, meter1.TotalBytesWrittenToStorage(), meter.GetStorageKeyValueSizeForTesting(key1, val2))
 
 		// first write of key2
-		key2 := meter.StorageInteractionKey{Owner: "", Key: "2"}
+		key2 := flow.NewRegisterID(flow.EmptyAddress, "2")
 		err = meter1.MeterStorageWrite(key2, val2, false)
 		require.NoError(t, err)
 		require.Equal(t, meter1.TotalBytesWrittenToStorage(),
@@ -439,7 +485,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters().WithStorageInteractionLimit(1),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 
 		err := meter1.MeterStorageRead(key1, val1, false /* not enforced */)
@@ -453,7 +499,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters().WithStorageInteractionLimit(testLimit),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 
 		err := meter1.MeterStorageRead(key1, val1, true /* enforced */)
@@ -471,7 +517,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters().WithStorageInteractionLimit(testLimit),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 
 		err := meter1.MeterStorageWrite(key1, val1, false /* not enforced */)
@@ -484,7 +530,7 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters().WithStorageInteractionLimit(testLimit),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
 		val1 := []byte{0x1, 0x2, 0x3}
 
 		err := meter1.MeterStorageWrite(key1, val1, true /* enforced */)
@@ -501,8 +547,8 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters(),
 		)
 
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
-		key2 := meter.StorageInteractionKey{Owner: "", Key: "2"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
+		key2 := flow.NewRegisterID(flow.EmptyAddress, "2")
 		val1 := []byte{0x1, 0x2, 0x3}
 		val2 := []byte{0x1, 0x2, 0x3, 0x4}
 		size1 := meter.GetStorageKeyValueSizeForTesting(key1, val1)
@@ -522,8 +568,8 @@ func TestStorageLimits(t *testing.T) {
 	})
 
 	t.Run("metering storage read and written - exceeding limit - not enforced", func(t *testing.T) {
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
-		key2 := meter.StorageInteractionKey{Owner: "", Key: "2"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
+		key2 := flow.NewRegisterID(flow.EmptyAddress, "2")
 		val1 := []byte{0x1, 0x2, 0x3}
 		val2 := []byte{0x1, 0x2, 0x3, 0x4}
 		size1 := meter.GetStorageKeyValueSizeForTesting(key1, val1)
@@ -547,8 +593,8 @@ func TestStorageLimits(t *testing.T) {
 	})
 
 	t.Run("metering storage read and written - exceeding limit - enforced", func(t *testing.T) {
-		key1 := meter.StorageInteractionKey{Owner: "", Key: "1"}
-		key2 := meter.StorageInteractionKey{Owner: "", Key: "2"}
+		key1 := flow.NewRegisterID(flow.EmptyAddress, "1")
+		key2 := flow.NewRegisterID(flow.EmptyAddress, "2")
 		val1 := []byte{0x1, 0x2, 0x3}
 		val2 := []byte{0x1, 0x2, 0x3, 0x4}
 		size1 := meter.GetStorageKeyValueSizeForTesting(key1, val1)
@@ -578,13 +624,13 @@ func TestStorageLimits(t *testing.T) {
 		meter1 := meter.NewMeter(
 			meter.DefaultParameters(),
 		)
-		readKey1 := meter.StorageInteractionKey{Owner: "", Key: "r1"}
+		readKey1 := flow.NewRegisterID(flow.EmptyAddress, "r1")
 		readVal1 := []byte{0x1, 0x2, 0x3}
 		readSize1 := meter.GetStorageKeyValueSizeForTesting(readKey1, readVal1)
 		err := meter1.MeterStorageRead(readKey1, readVal1, false)
 		require.NoError(t, err)
 
-		writeKey1 := meter.StorageInteractionKey{Owner: "", Key: "w1"}
+		writeKey1 := flow.NewRegisterID(flow.EmptyAddress, "w1")
 		writeVal1 := []byte{0x1, 0x2, 0x3, 0x4}
 		writeSize1 := meter.GetStorageKeyValueSizeForTesting(writeKey1, writeVal1)
 		err = meter1.MeterStorageWrite(writeKey1, writeVal1, false)
@@ -595,31 +641,40 @@ func TestStorageLimits(t *testing.T) {
 			meter.DefaultParameters(),
 		)
 
+		writeKey2 := flow.NewRegisterID(flow.EmptyAddress, "w2")
+		writeVal2 := []byte{0x1, 0x2, 0x3, 0x4, 0x5}
+		writeSize2 := meter.GetStorageKeyValueSizeForTesting(writeKey2, writeVal2)
+
+		err = meter1.MeterStorageRead(readKey1, readVal1, false)
+		require.NoError(t, err)
+
+		err = meter1.MeterStorageWrite(writeKey1, writeVal1, false)
+		require.NoError(t, err)
+
 		// read the same key value as meter1
 		err = meter2.MeterStorageRead(readKey1, readVal1, false)
 		require.NoError(t, err)
 
-		writeKey2 := meter.StorageInteractionKey{Owner: "", Key: "w2"}
-		writeVal2 := []byte{0x1, 0x2, 0x3, 0x4, 0x5}
-		writeSize2 := meter.GetStorageKeyValueSizeForTesting(writeKey2, writeVal2)
 		err = meter2.MeterStorageWrite(writeKey2, writeVal2, false)
 		require.NoError(t, err)
 
 		// merge
 		meter1.MergeMeter(meter2)
 
-		require.Equal(t, meter1.TotalBytesOfStorageInteractions(), readSize1*2+writeSize1+writeSize2)
-		require.Equal(t, meter1.TotalBytesReadFromStorage(), readSize1*2)
+		require.Equal(t, meter1.TotalBytesOfStorageInteractions(), readSize1+writeSize1+writeSize2)
+		require.Equal(t, meter1.TotalBytesReadFromStorage(), readSize1)
 		require.Equal(t, meter1.TotalBytesWrittenToStorage(), writeSize1+writeSize2)
 
-		storageUpdateSizeMap := meter1.GetStorageUpdateSizeMapForTesting()
-		readKey1Val, ok := storageUpdateSizeMap[readKey1]
+		reads, writes := meter1.GetStorageRWSizeMapForTesting()
+		readKey1Val, ok := reads[readKey1]
 		require.True(t, ok)
 		require.Equal(t, readKey1Val, readSize1) // meter merge only takes child values for rw bookkeeping
-		writeKey1Val, ok := storageUpdateSizeMap[writeKey1]
+
+		writeKey1Val, ok := writes[writeKey1]
 		require.True(t, ok)
 		require.Equal(t, writeKey1Val, writeSize1)
-		writeKey2Val, ok := storageUpdateSizeMap[writeKey2]
+
+		writeKey2Val, ok := writes[writeKey2]
 		require.True(t, ok)
 		require.Equal(t, writeKey2Val, writeSize2)
 	})
@@ -636,12 +691,10 @@ func TestEventLimits(t *testing.T) {
 		err := meter1.MeterEmittedEvent(testSize1)
 		require.NoError(t, err)
 		require.Equal(t, testSize1, meter1.TotalEmittedEventBytes())
-		require.Equal(t, uint32(1), meter1.TotalEventCounter())
 
 		err = meter1.MeterEmittedEvent(testSize2)
 		require.NoError(t, err)
 		require.Equal(t, testSize1+testSize2, meter1.TotalEmittedEventBytes())
-		require.Equal(t, uint32(2), meter1.TotalEventCounter())
 	})
 
 	t.Run("metering event emit - exceeding limit", func(t *testing.T) {
@@ -654,7 +707,6 @@ func TestEventLimits(t *testing.T) {
 		err := meter1.MeterEmittedEvent(testSize1)
 		require.NoError(t, err)
 		require.Equal(t, testSize1, meter1.TotalEmittedEventBytes())
-		require.Equal(t, uint32(1), meter1.TotalEventCounter())
 
 		err = meter1.MeterEmittedEvent(testSize2)
 		eventLimitExceededError := errors.NewEventLimitExceededError(
@@ -683,6 +735,5 @@ func TestEventLimits(t *testing.T) {
 		// merge
 		meter1.MergeMeter(meter2)
 		require.Equal(t, testSize1+testSize2, meter1.TotalEmittedEventBytes())
-		require.Equal(t, uint32(2), meter1.TotalEventCounter())
 	})
 }

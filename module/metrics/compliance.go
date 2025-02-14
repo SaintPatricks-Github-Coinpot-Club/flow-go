@@ -7,27 +7,29 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/module"
 )
 
 type ComplianceCollector struct {
-	finalizedHeight                 prometheus.Gauge
-	sealedHeight                    prometheus.Gauge
-	finalizedBlocks                 *prometheus.CounterVec
-	sealedBlocks                    prometheus.Counter
-	blockProposalDuration           prometheus.Counter
-	finalizedPayload                *prometheus.CounterVec
-	sealedPayload                   *prometheus.CounterVec
-	lastBlockFinalizedAt            time.Time
-	finalizedBlocksPerSecond        prometheus.Summary
-	committedEpochFinalView         prometheus.Gauge
-	currentEpochCounter             prometheus.Gauge
-	currentEpochPhase               prometheus.Gauge
-	currentEpochFinalView           prometheus.Gauge
-	currentDKGPhase1FinalView       prometheus.Gauge
-	currentDKGPhase2FinalView       prometheus.Gauge
-	currentDKGPhase3FinalView       prometheus.Gauge
-	epochEmergencyFallbackTriggered prometheus.Gauge
+	finalizedHeight            prometheus.Gauge
+	sealedHeight               prometheus.Gauge
+	finalizedBlocks            prometheus.Counter
+	sealedBlocks               prometheus.Counter
+	finalizedPayload           *prometheus.CounterVec
+	sealedPayload              *prometheus.CounterVec
+	lastBlockFinalizedAt       time.Time
+	finalizedBlocksPerSecond   prometheus.Summary
+	lastEpochTransitionHeight  prometheus.Gauge
+	currentEpochCounter        prometheus.Gauge
+	currentEpochPhase          prometheus.Gauge
+	currentEpochFinalView      prometheus.Gauge
+	currentDKGPhase1FinalView  prometheus.Gauge
+	currentDKGPhase2FinalView  prometheus.Gauge
+	currentDKGPhase3FinalView  prometheus.Gauge
+	epochFallbackModeTriggered prometheus.Gauge
 }
+
+var _ module.ComplianceMetrics = (*ComplianceCollector)(nil)
 
 func NewComplianceCollector() *ComplianceCollector {
 
@@ -47,11 +49,11 @@ func NewComplianceCollector() *ComplianceCollector {
 			Help:      "the current epoch's phase",
 		}),
 
-		committedEpochFinalView: promauto.NewGauge(prometheus.GaugeOpts{
-			Name:      "committed_epoch_final_view",
+		lastEpochTransitionHeight: promauto.NewGauge(prometheus.GaugeOpts{
+			Name:      "last_epoch_transition_height",
 			Namespace: namespaceConsensus,
 			Subsystem: subsystemCompliance,
-			Help:      "the final view of the committed epoch with the greatest counter",
+			Help:      "the height of the most recent finalized epoch transition; in other words the height of the first block of the current epoch",
 		}),
 
 		currentEpochFinalView: promauto.NewGauge(prometheus.GaugeOpts{
@@ -95,25 +97,18 @@ func NewComplianceCollector() *ComplianceCollector {
 			Help:      "the last sealed height",
 		}),
 
-		finalizedBlocks: promauto.NewCounterVec(prometheus.CounterOpts{
+		finalizedBlocks: promauto.NewCounter(prometheus.CounterOpts{
 			Name:      "finalized_blocks_total",
 			Namespace: namespaceConsensus,
 			Subsystem: subsystemCompliance,
 			Help:      "the number of finalized blocks",
-		}, []string{LabelProposer}),
+		}),
 
 		sealedBlocks: promauto.NewCounter(prometheus.CounterOpts{
 			Name:      "sealed_blocks_total",
 			Namespace: namespaceConsensus,
 			Subsystem: subsystemCompliance,
 			Help:      "the number of sealed blocks",
-		}),
-
-		blockProposalDuration: promauto.NewCounter(prometheus.CounterOpts{
-			Name:      "consensus_committee_block_proposal_duration_seconds_total",
-			Namespace: namespaceConsensus,
-			Subsystem: subsystemCompliance,
-			Help:      "time spent processing block proposals in seconds",
 		}),
 
 		finalizedPayload: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -147,11 +142,11 @@ func NewComplianceCollector() *ComplianceCollector {
 			BufCap:     500,
 		}),
 
-		epochEmergencyFallbackTriggered: promauto.NewGauge(prometheus.GaugeOpts{
+		epochFallbackModeTriggered: promauto.NewGauge(prometheus.GaugeOpts{
 			Name:      "epoch_fallback_triggered",
 			Namespace: namespaceConsensus,
 			Subsystem: subsystemCompliance,
-			Help:      "indicates whether epoch emergency fallback is triggered; if >0, the fallback is triggered",
+			Help:      "indicates whether epoch fallback mode is triggered; if >0, the fallback is triggered",
 		}),
 	}
 
@@ -167,11 +162,11 @@ func (cc *ComplianceCollector) FinalizedHeight(height uint64) {
 func (cc *ComplianceCollector) BlockFinalized(block *flow.Block) {
 	now := time.Now()
 	if !cc.lastBlockFinalizedAt.IsZero() {
-		cc.finalizedBlocksPerSecond.Observe(1 / now.Sub(cc.lastBlockFinalizedAt).Seconds())
+		cc.finalizedBlocksPerSecond.Observe(1.0 / now.Sub(cc.lastBlockFinalizedAt).Seconds())
 	}
 	cc.lastBlockFinalizedAt = now
 
-	cc.finalizedBlocks.With(prometheus.Labels{LabelProposer: block.Header.ProposerID.String()}).Inc()
+	cc.finalizedBlocks.Inc()
 	cc.finalizedPayload.With(prometheus.Labels{LabelResource: ResourceGuarantee}).Add(float64(len(block.Payload.Guarantees)))
 	cc.finalizedPayload.With(prometheus.Labels{LabelResource: ResourceSeal}).Add(float64(len(block.Payload.Seals)))
 }
@@ -188,12 +183,10 @@ func (cc *ComplianceCollector) BlockSealed(block *flow.Block) {
 	cc.sealedPayload.With(prometheus.Labels{LabelResource: ResourceSeal}).Add(float64(len(block.Payload.Seals)))
 }
 
-func (cc *ComplianceCollector) BlockProposalDuration(duration time.Duration) {
-	cc.blockProposalDuration.Add(duration.Seconds())
-}
-
-func (cc *ComplianceCollector) CommittedEpochFinalView(view uint64) {
-	cc.committedEpochFinalView.Set(float64(view))
+func (cc *ComplianceCollector) EpochTransitionHeight(height uint64) {
+	// An epoch transition comprises a block in epoch N followed by a block in epoch N+1.
+	// height here refers to the height of the first block in epoch N+1.
+	cc.lastEpochTransitionHeight.Set(float64(height))
 }
 
 func (cc *ComplianceCollector) CurrentEpochCounter(counter uint64) {
@@ -208,18 +201,16 @@ func (cc *ComplianceCollector) CurrentEpochFinalView(view uint64) {
 	cc.currentEpochFinalView.Set(float64(view))
 }
 
-func (cc *ComplianceCollector) CurrentDKGPhase1FinalView(view uint64) {
-	cc.currentDKGPhase1FinalView.Set(float64(view))
+func (cc *ComplianceCollector) CurrentDKGPhaseViews(phase1FinalView, phase2FinalView, phase3FinalView uint64) {
+	cc.currentDKGPhase1FinalView.Set(float64(phase1FinalView))
+	cc.currentDKGPhase2FinalView.Set(float64(phase2FinalView))
+	cc.currentDKGPhase3FinalView.Set(float64(phase3FinalView))
 }
 
-func (cc *ComplianceCollector) CurrentDKGPhase2FinalView(view uint64) {
-	cc.currentDKGPhase2FinalView.Set(float64(view))
+func (cc *ComplianceCollector) EpochFallbackModeTriggered() {
+	cc.epochFallbackModeTriggered.Set(float64(1))
 }
 
-func (cc *ComplianceCollector) CurrentDKGPhase3FinalView(view uint64) {
-	cc.currentDKGPhase3FinalView.Set(float64(view))
-}
-
-func (cc *ComplianceCollector) EpochEmergencyFallbackTriggered() {
-	cc.epochEmergencyFallbackTriggered.Set(float64(1))
+func (cc *ComplianceCollector) EpochFallbackModeExited() {
+	cc.epochFallbackModeTriggered.Set(float64(0))
 }

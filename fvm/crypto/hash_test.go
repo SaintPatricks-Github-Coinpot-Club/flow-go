@@ -1,18 +1,16 @@
 package crypto_test
 
 import (
-	"math/rand"
-	"testing"
-	"time"
-
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
+	"testing"
 
+	"github.com/onflow/crypto/hash"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/onflow/flow-go/crypto/hash"
 	"github.com/onflow/flow-go/fvm/crypto"
 	"github.com/onflow/flow-go/model/flow"
 )
@@ -45,16 +43,13 @@ func TestPrefixedHash(t *testing.T) {
 		},
 	}
 
-	r := time.Now().UnixNano()
-	rand.Seed(r)
-	t.Logf("math rand seed is %d", r)
-
 	for hashAlgo, testFunction := range hashingAlgoToTestingAlgo {
 		t.Run(hashAlgo.String()+" with a prefix", func(t *testing.T) {
 			for i := flow.DomainTagLength; i < 5000; i++ {
 				// first 32 bytes of data are the tag
 				data := make([]byte, i)
-				rand.Read(data)
+				_, err := rand.Read(data)
+				require.NoError(t, err)
 				expected := testFunction(data)
 
 				tag := string(data[:flow.DomainTagLength])
@@ -69,7 +64,8 @@ func TestPrefixedHash(t *testing.T) {
 		t.Run(hashAlgo.String()+" without a prefix", func(t *testing.T) {
 			for i := 0; i < 5000; i++ {
 				data := make([]byte, i)
-				rand.Read(data)
+				_, err := rand.Read(data)
+				require.NoError(t, err)
 				expected := testFunction(data)
 
 				tag := ""
@@ -82,7 +78,8 @@ func TestPrefixedHash(t *testing.T) {
 
 		t.Run(hashAlgo.String()+" with tagged prefix", func(t *testing.T) {
 			data := make([]byte, 100) // data to hash
-			rand.Read(data)
+			_, err := rand.Read(data)
+			require.NoError(t, err)
 			tag := "tag" // tag to be padded
 
 			hasher, err := crypto.NewPrefixedHashing(hashAlgo, tag)

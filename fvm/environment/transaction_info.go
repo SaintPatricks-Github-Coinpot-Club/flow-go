@@ -1,9 +1,11 @@
 package environment
 
 import (
-	"github.com/onflow/cadence/runtime"
+	"github.com/onflow/cadence/common"
 
 	"github.com/onflow/flow-go/fvm/errors"
+	"github.com/onflow/flow-go/fvm/storage/state"
+	"github.com/onflow/flow-go/fvm/tracing"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/trace"
 )
@@ -15,14 +17,18 @@ type TransactionInfoParams struct {
 
 	TransactionFeesEnabled bool
 	LimitAccountStorage    bool
+	// RandomSourceHistoryCallAllowed is true if the transaction is allowed to call the `entropy`
+	// cadence function to get the entropy of that block.
+	RandomSourceHistoryCallAllowed bool
 }
 
 func DefaultTransactionInfoParams() TransactionInfoParams {
 	// NOTE: TxIndex, TxId and TxBody are populated by NewTransactionEnv rather
 	// than by Context.
 	return TransactionInfoParams{
-		TransactionFeesEnabled: false,
-		LimitAccountStorage:    false,
+		TransactionFeesEnabled:         false,
+		LimitAccountStorage:            false,
+		RandomSourceHistoryCallAllowed: false,
 	}
 }
 
@@ -38,38 +44,85 @@ type TransactionInfo interface {
 	TransactionFeesEnabled() bool
 	LimitAccountStorage() bool
 
-	SigningAccounts() []runtime.Address
-
 	IsServiceAccountAuthorizer() bool
 
 	// Cadence's runtime API.  Note that the script variant will return
 	// OperationNotSupportedError.
-	GetSigningAccounts() ([]runtime.Address, error)
+	GetSigningAccounts() ([]common.Address, error)
 }
+
+type ParseRestrictedTransactionInfo struct {
+	txnState state.NestedTransactionPreparer
+	impl     TransactionInfo
+}
+
+func NewParseRestrictedTransactionInfo(
+	txnState state.NestedTransactionPreparer,
+	impl TransactionInfo,
+) TransactionInfo {
+	return ParseRestrictedTransactionInfo{
+		txnState: txnState,
+		impl:     impl,
+	}
+}
+
+func (info ParseRestrictedTransactionInfo) TxIndex() uint32 {
+	return info.impl.TxIndex()
+}
+
+func (info ParseRestrictedTransactionInfo) TxID() flow.Identifier {
+	return info.impl.TxID()
+}
+
+func (info ParseRestrictedTransactionInfo) TransactionFeesEnabled() bool {
+	return info.impl.TransactionFeesEnabled()
+}
+
+func (info ParseRestrictedTransactionInfo) LimitAccountStorage() bool {
+	return info.impl.LimitAccountStorage()
+}
+
+func (info ParseRestrictedTransactionInfo) IsServiceAccountAuthorizer() bool {
+	return info.impl.IsServiceAccountAuthorizer()
+}
+
+func (info ParseRestrictedTransactionInfo) GetSigningAccounts() (
+	[]common.Address,
+	error,
+) {
+	return parseRestrict1Ret(
+		info.txnState,
+		trace.FVMEnvGetSigningAccounts,
+		info.impl.GetSigningAccounts)
+}
+
+var _ TransactionInfo = &transactionInfo{}
 
 type transactionInfo struct {
 	params TransactionInfoParams
 
-	tracer *Tracer
+	tracer tracing.TracerSpan
 
-	authorizers                []runtime.Address
+	runtimeAuthorizers         []common.Address
 	isServiceAccountAuthorizer bool
 }
 
 func NewTransactionInfo(
 	params TransactionInfoParams,
-	tracer *Tracer,
+	tracer tracing.TracerSpan,
 	serviceAccount flow.Address,
 ) TransactionInfo {
 
 	isServiceAccountAuthorizer := false
 	runtimeAddresses := make(
-		[]runtime.Address,
+		[]common.Address,
 		0,
 		len(params.TxBody.Authorizers))
 
 	for _, auth := range params.TxBody.Authorizers {
-		runtimeAddresses = append(runtimeAddresses, runtime.Address(auth))
+		runtimeAddresses = append(
+			runtimeAddresses,
+			common.MustBytesToAddress(auth.Bytes()))
 		if auth == serviceAccount {
 			isServiceAccountAuthorizer = true
 		}
@@ -78,7 +131,7 @@ func NewTransactionInfo(
 	return &transactionInfo{
 		params:                     params,
 		tracer:                     tracer,
-		authorizers:                runtimeAddresses,
+		runtimeAuthorizers:         runtimeAddresses,
 		isServiceAccountAuthorizer: isServiceAccountAuthorizer,
 	}
 }
@@ -99,19 +152,15 @@ func (info *transactionInfo) LimitAccountStorage() bool {
 	return info.params.LimitAccountStorage
 }
 
-func (info *transactionInfo) SigningAccounts() []runtime.Address {
-	return info.authorizers
-}
-
 func (info *transactionInfo) IsServiceAccountAuthorizer() bool {
 	return info.isServiceAccountAuthorizer
 }
 
-func (info *transactionInfo) GetSigningAccounts() ([]runtime.Address, error) {
-	defer info.tracer.StartExtensiveTracingSpanFromRoot(
+func (info *transactionInfo) GetSigningAccounts() ([]common.Address, error) {
+	defer info.tracer.StartExtensiveTracingChildSpan(
 		trace.FVMEnvGetSigningAccounts).End()
 
-	return info.authorizers, nil
+	return info.runtimeAuthorizers, nil
 }
 
 var _ TransactionInfo = NoTransactionInfo{}
@@ -136,14 +185,10 @@ func (NoTransactionInfo) LimitAccountStorage() bool {
 	return false
 }
 
-func (NoTransactionInfo) SigningAccounts() []runtime.Address {
-	return nil
-}
-
 func (NoTransactionInfo) IsServiceAccountAuthorizer() bool {
 	return false
 }
 
-func (NoTransactionInfo) GetSigningAccounts() ([]runtime.Address, error) {
+func (NoTransactionInfo) GetSigningAccounts() ([]common.Address, error) {
 	return nil, errors.NewOperationNotSupportedError("GetSigningAccounts")
 }

@@ -29,28 +29,27 @@ type LoadCase struct {
 	duration time.Duration
 }
 
+const (
+	defaultMaxMsgSize = 1024 * 1024 * 16 // 16 MB
+)
+
 func main() {
 	sleep := flag.Duration("sleep", 0, "duration to sleep before benchmarking starts")
-	loadTypeFlag := flag.String("load-type", "token-transfer", "type of loads (\"token-transfer\", \"add-keys\", \"computation-heavy\", \"event-heavy\", \"ledger-heavy\", \"const-exec\")")
+	loadTypeFlag := flag.String("load-type", "token-transfer", "type of loads (\"token-transfer\", \"add-keys\", \"computation-heavy\", \"event-heavy\", \"ledger-heavy\", \"const-exec\", \"exec-data-heavy\")")
 	tpsFlag := flag.String("tps", "1", "transactions per second (TPS) to send, accepts a comma separated list of values if used in conjunction with `tps-durations`")
 	tpsDurationsFlag := flag.String("tps-durations", "0", "duration that each load test will run, accepts a comma separted list that will be applied to multiple values of the `tps` flag (defaults to infinite if not provided, meaning only the first tps case will be tested; additional values will be ignored)")
 	chainIDStr := flag.String("chain", string(flowsdk.Emulator), "chain ID")
-	accessNodes := flag.String("access", net.JoinHostPort("127.0.0.1", "3569"), "access node address")
+	accessNodes := flag.String("access", net.JoinHostPort("127.0.0.1", "4001"), "access node address")
 	serviceAccountPrivateKeyHex := flag.String("servPrivHex", unittest.ServiceAccountPrivateKeyHex, "service account private key hex")
 	logLvl := flag.String("log-level", "info", "set log level")
 	metricport := flag.Uint("metricport", 8080, "port for /metrics endpoint")
 	pushgateway := flag.String("pushgateway", "127.0.0.1:9091", "host:port for pushgateway")
-	profilerEnabled := flag.Bool("profiler-enabled", false, "whether to enable the auto-profiler")
 	_ = flag.Bool("track-txs", false, "deprecated")
 	accountMultiplierFlag := flag.Int("account-multiplier", 100, "number of accounts to create per load tps")
 	feedbackEnabled := flag.Bool("feedback-enabled", true, "wait for trannsaction execution before submitting new transaction")
-	maxConstExecTxSizeInBytes := flag.Uint("const-exec-max-tx-size", flow.DefaultMaxTransactionByteSize/10, "max byte size of constant exec transaction size to generate")
-	authAccNumInConstExecTx := flag.Uint("const-exec-num-authorizer", 1, "num of authorizer for each constant exec transaction to generate")
-	argSizeInByteInConstExecTx := flag.Uint("const-exec-arg-size", 100, "byte size of tx argument for each constant exec transaction to generate")
-	payerKeyCountInConstExecTx := flag.Uint("const-exec-payer-key-count", 2, "num of payer keys for each constant exec transaction to generate")
 	flag.Parse()
 
-	chainID := flowsdk.ChainID([]byte(*chainIDStr))
+	chainID := flowsdk.ChainID(*chainIDStr)
 
 	// parse log level and apply to logger
 	log := zerolog.New(os.Stderr).With().Timestamp().Logger().Output(zerolog.ConsoleWriter{Out: os.Stderr})
@@ -60,15 +59,17 @@ func main() {
 	}
 	log = log.Level(lvl)
 
-	server := metrics.NewServer(log, *metricport, *profilerEnabled)
+	server := metrics.NewServer(log, *metricport)
 	<-server.Ready()
 	loaderMetrics := metrics.NewLoaderCollector()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sp := benchmark.NewStatsPusher(ctx, log, *pushgateway, "loader", prometheus.DefaultGatherer)
-	defer sp.Stop()
+	if *pushgateway != "disabled" {
+		sp := benchmark.NewStatsPusher(ctx, log, *pushgateway, "loader", prometheus.DefaultGatherer)
+		defer sp.Stop()
+	}
 
 	addressGen := flowsdk.NewAddressGenerator(chainID)
 	serviceAccountAddress := addressGen.NextAddress()
@@ -87,7 +88,16 @@ func main() {
 	accessNodeAddrs := strings.Split(*accessNodes, ",")
 	clients := make([]access.Client, 0, len(accessNodeAddrs))
 	for _, addr := range accessNodeAddrs {
-		client, err := client.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		client, err := client.NewClient(
+			addr,
+			client.WithGRPCDialOptions(
+				grpc.WithDefaultCallOptions(
+					grpc.MaxCallRecvMsgSize(defaultMaxMsgSize),
+					grpc.MaxCallSendMsgSize(defaultMaxMsgSize),
+				),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+			),
+		)
 		if err != nil {
 			log.Fatal().Str("addr", addr).Err(err).Msgf("unable to initialize flow client")
 		}
@@ -103,38 +113,39 @@ func main() {
 		}
 	}
 
+	workerStatsTracker := benchmark.NewWorkerStatsTracker(ctx)
+	defer workerStatsTracker.Stop()
+
+	statsLogger := benchmark.NewPeriodicStatsLogger(context.TODO(), workerStatsTracker, log)
+	statsLogger.Start()
+	defer statsLogger.Stop()
+
 	lg, err := benchmark.New(
 		ctx,
 		log,
+		workerStatsTracker,
 		loaderMetrics,
 		clients,
 		benchmark.NetworkParams{
-			ServAccPrivKeyHex:     *serviceAccountPrivateKeyHex,
-			ServiceAccountAddress: &serviceAccountAddress,
-			FungibleTokenAddress:  &fungibleTokenAddress,
-			FlowTokenAddress:      &flowTokenAddress,
+			ServAccPrivKeyHex: *serviceAccountPrivateKeyHex,
+			ChainId:           flow.ChainID(chainID),
 		},
 		benchmark.LoadParams{
 			NumberOfAccounts: int(maxTPS) * *accountMultiplierFlag,
-			LoadType:         benchmark.LoadType(*loadTypeFlag),
-			FeedbackEnabled:  *feedbackEnabled,
-		},
-		benchmark.ConstExecParams{
-			MaxTxSizeInByte: *maxConstExecTxSizeInBytes,
-			AuthAccountNum:  *authAccNumInConstExecTx,
-			ArgSizeInByte:   *argSizeInByteInConstExecTx,
-			PayerKeyCount:   *payerKeyCountInConstExecTx,
+			LoadConfig: benchmark.LoadConfig{
+				LoadName:   *loadTypeFlag,
+				LoadType:   *loadTypeFlag,
+				TpsMax:     int(maxTPS),
+				TpsMin:     int(maxTPS),
+				TPSInitial: int(maxTPS),
+			},
+			FeedbackEnabled: *feedbackEnabled,
 		},
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to create new cont load generator")
 	}
 	defer lg.Stop()
-
-	err = lg.Init()
-	if err != nil {
-		log.Fatal().Err(err).Msg("unable to init loader")
-	}
 
 	for i, c := range loadCases {
 		log.Info().
@@ -148,8 +159,6 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("unable to set tps")
 		}
-		// TODO(rbtz): pass metrics to the load generator
-		loaderMetrics.SetTPSConfigured(c.tps)
 
 		// if the duration is 0, we run this case forever
 		waitC := make(<-chan time.Time)

@@ -5,11 +5,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/onflow/flow-go/network/p2p"
+
 	"github.com/rs/zerolog"
 	"github.com/sethvargo/go-retry"
 	"go.uber.org/atomic"
 
-	"github.com/onflow/flow-go/network/p2p/p2pnode"
 	"github.com/onflow/flow-go/network/p2p/utils"
 
 	"github.com/onflow/flow-go/model/flow"
@@ -19,15 +20,15 @@ import (
 // upstreamConnector tries to connect the unstaked AN with atleast one of the configured bootstrap access nodes
 type upstreamConnector struct {
 	lm                  *lifecycle.LifecycleManager
-	bootstrapIdentities flow.IdentityList
+	bootstrapIdentities flow.IdentitySkeletonList
 	logger              zerolog.Logger
-	unstakedNode        *p2pnode.Node
+	unstakedNode        p2p.LibP2PNode
 	cancel              context.CancelFunc
 	retryInitialTimeout time.Duration
 	maxRetries          uint64
 }
 
-func NewUpstreamConnector(bootstrapIdentities flow.IdentityList, unstakedNode *p2pnode.Node, logger zerolog.Logger) *upstreamConnector {
+func NewUpstreamConnector(bootstrapIdentities flow.IdentitySkeletonList, unstakedNode p2p.LibP2PNode, logger zerolog.Logger) *upstreamConnector {
 	return &upstreamConnector{
 		lm:                  lifecycle.NewLifecycleManager(),
 		bootstrapIdentities: bootstrapIdentities,
@@ -85,7 +86,7 @@ func (connector *upstreamConnector) Ready() <-chan struct{} {
 }
 
 // connect is run to connect to an boostrap peer
-func (connector *upstreamConnector) connect(ctx context.Context, bootstrapPeer flow.Identity) error {
+func (connector *upstreamConnector) connect(ctx context.Context, bootstrapPeer flow.IdentitySkeleton) error {
 
 	select {
 	// check for a cancelled/expired context
@@ -101,7 +102,7 @@ func (connector *upstreamConnector) connect(ctx context.Context, bootstrapPeer f
 	}
 
 	// try and connect to the bootstrap server
-	return connector.unstakedNode.AddPeer(ctx, peerAddrInfo)
+	return connector.unstakedNode.ConnectToPeer(ctx, peerAddrInfo)
 }
 
 func (connector *upstreamConnector) Done() <-chan struct{} {

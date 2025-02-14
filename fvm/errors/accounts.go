@@ -32,7 +32,7 @@ func NewAccountAlreadyExistsError(address flow.Address) CodedError {
 // when a public key not found for the given address and key index.
 func NewAccountPublicKeyNotFoundError(
 	address flow.Address,
-	keyIndex uint64,
+	keyIndex uint32,
 ) CodedError {
 	return NewCodedError(
 		ErrCodeAccountPublicKeyNotFoundError,
@@ -41,40 +41,17 @@ func NewAccountPublicKeyNotFoundError(
 		keyIndex)
 }
 
-// IsAccountAccountPublicKeyNotFoundError returns true if error has this type
-func IsAccountAccountPublicKeyNotFoundError(err error) bool {
+// IsAccountPublicKeyNotFoundError returns true if error has this type
+func IsAccountPublicKeyNotFoundError(err error) bool {
 	return HasErrorCode(err, ErrCodeAccountPublicKeyNotFoundError)
-}
-
-// FrozenAccountError is returned when a frozen account signs a transaction
-type FrozenAccountError struct {
-	address flow.Address
-
-	CodedError
-}
-
-// NewFrozenAccountError constructs a new FrozenAccountError
-func NewFrozenAccountError(address flow.Address) CodedError {
-	return FrozenAccountError{
-		address: address,
-		CodedError: NewCodedError(
-			ErrCodeFrozenAccountError,
-			"account %s is frozen",
-			address),
-	}
-}
-
-// Address returns the address of frozen account
-func (e FrozenAccountError) Address() flow.Address {
-	return e.address
 }
 
 // NewAccountPublicKeyLimitError constructs a new CodedError.  It is returned
 // when an account tries to add public keys over the limit.
 func NewAccountPublicKeyLimitError(
 	address flow.Address,
-	counts uint64,
-	limit uint64,
+	counts uint32,
+	limit uint32,
 ) CodedError {
 	return NewCodedError(
 		ErrCodeAccountPublicKeyLimitError,

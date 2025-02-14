@@ -2,16 +2,14 @@ package translator_test
 
 import (
 	"crypto/rand"
-	"math"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	fcrypto "github.com/onflow/crypto"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onflow/flow-go/network/p2p/translator"
-
-	fcrypto "github.com/onflow/flow-go/crypto"
 	"github.com/onflow/flow-go/network/p2p/keyutils"
+	"github.com/onflow/flow-go/network/p2p/translator"
 )
 
 // For these test, refer to https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md for libp2p
@@ -99,7 +97,7 @@ func createPeerIDFromAlgo(t *testing.T, sa fcrypto.SigningAlgorithm) peer.ID {
 }
 
 func createSeed(t *testing.T) []byte {
-	seedLen := int(math.Max(fcrypto.KeyGenSeedMinLenECDSAP256, fcrypto.KeyGenSeedMinLenECDSASecp256k1))
+	const seedLen = fcrypto.KeyGenSeedMinLen
 	seed := make([]byte, seedLen)
 	n, err := rand.Read(seed)
 	require.NoError(t, err)

@@ -1,18 +1,11 @@
 package environment
 
 import (
-	"context"
-
 	"github.com/onflow/cadence"
 	"github.com/onflow/cadence/runtime"
-	"github.com/onflow/cadence/runtime/common"
-	otelTrace "go.opentelemetry.io/otel/trace"
 
-	"github.com/onflow/flow-go/fvm/programs"
 	reusableRuntime "github.com/onflow/flow-go/fvm/runtime"
-	"github.com/onflow/flow-go/fvm/state"
 	"github.com/onflow/flow-go/model/flow"
-	"github.com/onflow/flow-go/module/trace"
 )
 
 // Environment implements the accounts business logic and exposes cadence
@@ -20,10 +13,11 @@ import (
 type Environment interface {
 	runtime.Interface
 
-	// Tracer
-	StartSpanFromRoot(name trace.SpanName) otelTrace.Span
+	Tracer
 
 	Meter
+
+	MetricsReporter
 
 	// Runtime
 	BorrowCadenceRuntime() *reusableRuntime.ReusableCadenceRuntime
@@ -32,14 +26,33 @@ type Environment interface {
 	TransactionInfo
 
 	// ProgramLogger
+	LoggerProvider
 	Logs() []string
 
 	// EventEmitter
-	Events() []flow.Event
-	ServiceEvents() []flow.Event
+	Events() flow.EventsList
+	ServiceEvents() flow.EventsList
+	ConvertedServiceEvents() flow.ServiceEventList
 
 	// SystemContracts
-	AccountsStorageCapacity(addresses []common.Address) (cadence.Value, error)
+	ContractFunctionInvoker
+
+	AccountsStorageCapacity(
+		addresses []flow.Address,
+		payer flow.Address,
+		maxTxFees uint64,
+	) (
+		cadence.Value,
+		error,
+	)
+	CheckPayerBalanceAndGetMaxTxFees(
+		payer flow.Address,
+		inclusionEffort uint64,
+		executionEffort uint64,
+	) (
+		cadence.Value,
+		error,
+	)
 	DeductTransactionFees(
 		payer flow.Address,
 		inclusionEffort uint64,
@@ -51,19 +64,23 @@ type Environment interface {
 
 	// AccountInfo
 	GetAccount(address flow.Address) (*flow.Account, error)
+	GetAccountKeys(address flow.Address) ([]flow.AccountPublicKey, error)
 
-	AccountFreezer
+	// RandomSourceHistory is the current block's derived random source.
+	// This source is only used by the core-contract that tracks the random source
+	// history for commit-reveal schemes.
+	RandomSourceHistory() ([]byte, error)
 
 	// FlushPendingUpdates flushes pending updates from the stateful environment
 	// modules (i.e., ContractUpdater) to the state transaction, and return
-	// corresponding modified sets invalidator.
+	// the updated contract keys.
 	FlushPendingUpdates() (
-		programs.ModifiedSetsInvalidator,
+		ContractUpdates,
 		error,
 	)
 
 	// Reset resets all stateful environment modules (e.g., ContractUpdater,
-	// EventEmitter, AccountFreezer) to initial state.
+	// EventEmitter) to initial state.
 	Reset()
 }
 
@@ -76,45 +93,35 @@ type EnvironmentParams struct {
 
 	RuntimeParams
 
-	TracerParams
 	ProgramLoggerParams
 
 	EventEmitterParams
 
 	BlockInfoParams
 	TransactionInfoParams
+	ScriptInfoParams
+
+	EntropyProvider
+	ExecutionVersionProvider
 
 	ContractUpdaterParams
 }
 
 func DefaultEnvironmentParams() EnvironmentParams {
+	const chainID = flow.Mainnet
 	return EnvironmentParams{
-		Chain:                 flow.Mainnet.Chain(),
-		ServiceAccountEnabled: true,
-
-		RuntimeParams:         DefaultRuntimeParams(),
-		TracerParams:          DefaultTracerParams(),
-		ProgramLoggerParams:   DefaultProgramLoggerParams(),
-		EventEmitterParams:    DefaultEventEmitterParams(),
-		BlockInfoParams:       DefaultBlockInfoParams(),
-		TransactionInfoParams: DefaultTransactionInfoParams(),
-		ContractUpdaterParams: DefaultContractUpdaterParams(),
+		Chain:                    chainID.Chain(),
+		ServiceAccountEnabled:    true,
+		RuntimeParams:            DefaultRuntimeParams(),
+		ProgramLoggerParams:      DefaultProgramLoggerParams(),
+		EventEmitterParams:       DefaultEventEmitterParams(),
+		BlockInfoParams:          DefaultBlockInfoParams(),
+		TransactionInfoParams:    DefaultTransactionInfoParams(),
+		ContractUpdaterParams:    DefaultContractUpdaterParams(),
+		ExecutionVersionProvider: ZeroExecutionVersionProvider{},
 	}
 }
 
-func NewScriptEnvironment(
-	ctx context.Context,
-	params EnvironmentParams,
-	txnState *state.TransactionState,
-	programs TransactionPrograms,
-) Environment {
-	return newScriptFacadeEnvironment(ctx, params, txnState, programs)
-}
-
-func NewTransactionEnvironment(
-	params EnvironmentParams,
-	txnState *state.TransactionState,
-	programs TransactionPrograms,
-) Environment {
-	return newTransactionFacadeEnvironment(params, txnState, programs)
+func (env *EnvironmentParams) SetScriptInfoParams(info *ScriptInfoParams) {
+	env.ScriptInfoParams = *info
 }
