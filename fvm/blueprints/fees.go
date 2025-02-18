@@ -6,24 +6,23 @@ import (
 	"fmt"
 
 	"github.com/onflow/cadence"
+	"github.com/onflow/cadence/common"
 	jsoncdc "github.com/onflow/cadence/encoding/json"
-	"github.com/onflow/cadence/runtime/common"
-	"github.com/onflow/flow-core-contracts/lib/go/contracts"
 	"github.com/onflow/flow-core-contracts/lib/go/templates"
 
 	"github.com/onflow/flow-go/model/flow"
 )
 
 var TransactionFeesExecutionEffortWeightsPath = cadence.Path{
-	Domain:     common.PathDomainStorage.Identifier(),
+	Domain:     common.PathDomainStorage,
 	Identifier: "executionEffortWeights",
 }
 var TransactionFeesExecutionMemoryWeightsPath = cadence.Path{
-	Domain:     common.PathDomainStorage.Identifier(),
+	Domain:     common.PathDomainStorage,
 	Identifier: "executionMemoryWeights",
 }
 var TransactionFeesExecutionMemoryLimitPath = cadence.Path{
-	Domain:     common.PathDomainStorage.Identifier(),
+	Domain:     common.PathDomainStorage,
 	Identifier: "executionMemoryLimit",
 }
 
@@ -36,17 +35,16 @@ var setupParametersTransactionTemplate string
 //go:embed scripts/setupStorageForServiceAccountsTemplate.cdc
 var setupStorageForServiceAccountsTemplate string
 
+//go:embed scripts/setupStorageForAccount.cdc
+var setupStorageForAccountTemplate string
+
 //go:embed scripts/setupFeesTransactionTemplate.cdc
 var setupFeesTransactionTemplate string
 
 //go:embed scripts/setExecutionMemoryLimit.cdc
 var setExecutionMemoryLimit string
 
-func DeployTxFeesContractTransaction(service, fungibleToken, flowToken, flowFees flow.Address) *flow.TransactionBody {
-	contract := contracts.FlowFees(
-		fungibleToken.HexWithPrefix(),
-		flowToken.HexWithPrefix(),
-	)
+func DeployTxFeesContractTransaction(flowFees, service flow.Address, contract []byte) *flow.TransactionBody {
 
 	return flow.NewTransactionBody().
 		SetScript([]byte(deployTxFeesTransactionTemplate)).
@@ -115,6 +113,22 @@ func SetupStorageForServiceAccountsTransaction(
 		AddAuthorizer(feeContract)
 }
 
+func SetupStorageForAccountTransaction(
+	account, service, fungibleToken, flowToken flow.Address,
+) *flow.TransactionBody {
+	return flow.NewTransactionBody().
+		SetScript([]byte(templates.ReplaceAddresses(setupStorageForAccountTemplate,
+			templates.Environment{
+				ServiceAccountAddress: service.Hex(),
+				StorageFeesAddress:    service.Hex(),
+				FungibleTokenAddress:  fungibleToken.Hex(),
+				FlowTokenAddress:      flowToken.Hex(),
+			})),
+		).
+		AddAuthorizer(account).
+		AddAuthorizer(service)
+}
+
 func SetupFeesTransaction(
 	service flow.Address,
 	flowFees flow.Address,
@@ -149,11 +163,11 @@ func SetupFeesTransaction(
 
 // SetExecutionEffortWeightsTransaction creates a transaction that sets up weights for the weighted Meter.
 func SetExecutionEffortWeightsTransaction(
-	service flow.Address,
+	parametersAccount flow.Address,
 	weights map[uint]uint64,
 ) (*flow.TransactionBody, error) {
 	return setExecutionWeightsTransaction(
-		service,
+		parametersAccount,
 		weights,
 		TransactionFeesExecutionEffortWeightsPath,
 	)
@@ -161,18 +175,18 @@ func SetExecutionEffortWeightsTransaction(
 
 // SetExecutionMemoryWeightsTransaction creates a transaction that sets up weights for the weighted Meter.
 func SetExecutionMemoryWeightsTransaction(
-	service flow.Address,
+	parametersAccount flow.Address,
 	weights map[uint]uint64,
 ) (*flow.TransactionBody, error) {
 	return setExecutionWeightsTransaction(
-		service,
+		parametersAccount,
 		weights,
 		TransactionFeesExecutionMemoryWeightsPath,
 	)
 }
 
 func setExecutionWeightsTransaction(
-	service flow.Address,
+	parametersAccount flow.Address,
 	weights map[uint]uint64,
 	path cadence.Path,
 ) (*flow.TransactionBody, error) {
@@ -199,7 +213,7 @@ func setExecutionWeightsTransaction(
 		SetScript([]byte(setExecutionWeightsScript)).
 		AddArgument(newWeights).
 		AddArgument(storagePath).
-		AddAuthorizer(service)
+		AddAuthorizer(parametersAccount)
 
 	return tx, nil
 }
@@ -208,7 +222,7 @@ func setExecutionWeightsTransaction(
 var setExecutionWeightsScript string
 
 func SetExecutionMemoryLimitTransaction(
-	service flow.Address,
+	parametersAccount flow.Address,
 	limit uint64,
 ) (*flow.TransactionBody, error) {
 	newLimit, err := jsoncdc.Encode(cadence.UInt64(limit))
@@ -225,7 +239,7 @@ func SetExecutionMemoryLimitTransaction(
 		SetScript([]byte(setExecutionMemoryLimit)).
 		AddArgument(newLimit).
 		AddArgument(storagePath).
-		AddAuthorizer(service)
+		AddAuthorizer(parametersAccount)
 
 	return tx, nil
 }

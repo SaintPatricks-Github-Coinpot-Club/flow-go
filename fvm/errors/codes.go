@@ -4,28 +4,32 @@ import "fmt"
 
 type ErrorCode uint16
 
-func (ec ErrorCode) IsFailure() bool {
-	return ec >= FailureCodeUnknownFailure
-}
-
 func (ec ErrorCode) String() string {
-	if ec.IsFailure() {
-		return fmt.Sprintf("[Failure Code: %d]", ec)
-	}
 	return fmt.Sprintf("[Error Code: %d]", ec)
 }
 
+type FailureCode uint16
+
+func (fc FailureCode) String() string {
+	return fmt.Sprintf("[Failure Code: %d]", fc)
+}
+
 const (
-	FailureCodeUnknownFailure     ErrorCode = 2000
-	FailureCodeEncodingFailure    ErrorCode = 2001
-	FailureCodeLedgerFailure      ErrorCode = 2002
-	FailureCodeStateMergeFailure  ErrorCode = 2003
-	FailureCodeBlockFinderFailure ErrorCode = 2004
+	FailureCodeUnknownFailure     FailureCode = 2000
+	FailureCodeEncodingFailure    FailureCode = 2001
+	FailureCodeLedgerFailure      FailureCode = 2002
+	FailureCodeStateMergeFailure  FailureCode = 2003
+	FailureCodeBlockFinderFailure FailureCode = 2004
 	// Deprecated: No longer used.
-	FailureCodeHasherFailure                           ErrorCode = 2005
-	FailureCodeParseRestrictedModeInvalidAccessFailure ErrorCode = 2006
+	FailureCodeHasherFailure                           FailureCode = 2005
+	FailureCodeParseRestrictedModeInvalidAccessFailure FailureCode = 2006
+	FailureCodePayerBalanceCheckFailure                FailureCode = 2007
+	FailureCodeDerivedDataCacheImplementationFailure   FailureCode = 2008
+	FailureCodeRandomSourceFailure                     FailureCode = 2009
+	FailureCodeEVMFailure                              FailureCode = 2010
+	FailureCodeExecutionVersionProvider                FailureCode = 2011
 	// Deprecated: No longer used.
-	FailureCodeMetaTransactionFailure ErrorCode = 2100
+	FailureCodeMetaTransactionFailure FailureCode = 2100
 )
 
 const (
@@ -57,6 +61,7 @@ const (
 	ErrCodeAccountAuthorizationError   ErrorCode = 1055
 	ErrCodeOperationAuthorizationError ErrorCode = 1056
 	ErrCodeOperationNotSupportedError  ErrorCode = 1057
+	ErrCodeBlockHeightOutOfRangeError  ErrorCode = 1058
 
 	// execution errors 1100 - 1200
 	// Deprecated: No longer used.
@@ -75,8 +80,12 @@ const (
 	ErrCodeComputationLimitExceededError             ErrorCode = 1110
 	ErrCodeMemoryLimitExceededError                  ErrorCode = 1111
 	ErrCodeCouldNotDecodeExecutionParameterFromState ErrorCode = 1112
-	ErrCodeScriptExecutionCancelledError             ErrorCode = 1114
 	ErrCodeScriptExecutionTimedOutError              ErrorCode = 1113
+	ErrCodeScriptExecutionCancelledError             ErrorCode = 1114
+	ErrCodeEventEncodingError                        ErrorCode = 1115
+	ErrCodeInvalidInternalStateAccessError           ErrorCode = 1116
+	// 1117 was never deployed and is free to use
+	ErrCodeInsufficientPayerBalance ErrorCode = 1118
 
 	// accounts errors 1200 - 1250
 	// Deprecated: No longer used.
@@ -84,7 +93,8 @@ const (
 	ErrCodeAccountNotFoundError          ErrorCode = 1201
 	ErrCodeAccountPublicKeyNotFoundError ErrorCode = 1202
 	ErrCodeAccountAlreadyExistsError     ErrorCode = 1203
-	ErrCodeFrozenAccountError            ErrorCode = 1204
+	// Deprecated: No longer used.
+	ErrCodeFrozenAccountError ErrorCode = 1204
 	// Deprecated: No longer used.
 	ErrCodeAccountStorageNotInitializedError ErrorCode = 1205
 	ErrCodeAccountPublicKeyLimitError        ErrorCode = 1206
@@ -95,4 +105,7 @@ const (
 	ErrCodeContractNotFoundError ErrorCode = 1251
 	// Deprecated: No longer used.
 	ErrCodeContractNamesNotFoundError ErrorCode = 1252
+
+	// fvm std lib errors 1300-1400
+	ErrEVMExecutionError ErrorCode = 1300
 )

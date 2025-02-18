@@ -3,13 +3,14 @@ package assigner
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"github.com/onflow/flow-go/engine"
 	"github.com/onflow/flow-go/model/chunks"
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/model/flow/filter"
 	"github.com/onflow/flow-go/module"
 	"github.com/onflow/flow-go/module/trace"
 	"github.com/onflow/flow-go/state/protocol"
@@ -22,7 +23,6 @@ import (
 // to me to verify, and then save it to the chunks job queue for the
 // fetcher engine to process.
 type Engine struct {
-	unit                  *engine.Unit
 	log                   zerolog.Logger
 	metrics               module.VerificationMetrics
 	tracer                module.Tracer
@@ -32,7 +32,12 @@ type Engine struct {
 	chunksQueue           storage.ChunksQueue       // to store chunks to be verified.
 	newChunkListener      module.NewJobListener     // to notify chunk queue consumer about a new chunk.
 	blockConsumerNotifier module.ProcessingNotifier // to report a block has been processed.
+	stopAtHeight          uint64
+	stopAtBlockID         atomic.Value
+	*module.NoopReadyDoneAware
 }
+
+var _ module.ReadyDoneAware = (*Engine)(nil)
 
 func New(
 	log zerolog.Logger,
@@ -43,9 +48,9 @@ func New(
 	assigner module.ChunkAssigner,
 	chunksQueue storage.ChunksQueue,
 	newChunkListener module.NewJobListener,
+	stopAtHeight uint64,
 ) *Engine {
-	return &Engine{
-		unit:             engine.NewUnit(),
+	e := &Engine{
 		log:              log.With().Str("engine", "assigner").Logger(),
 		metrics:          metrics,
 		tracer:           tracer,
@@ -54,19 +59,14 @@ func New(
 		assigner:         assigner,
 		chunksQueue:      chunksQueue,
 		newChunkListener: newChunkListener,
+		stopAtHeight:     stopAtHeight,
 	}
+	e.stopAtBlockID.Store(flow.ZeroID)
+	return e
 }
 
 func (e *Engine) WithBlockConsumerNotifier(notifier module.ProcessingNotifier) {
 	e.blockConsumerNotifier = notifier
-}
-
-func (e *Engine) Ready() <-chan struct{} {
-	return e.unit.Ready()
-}
-
-func (e *Engine) Done() <-chan struct{} {
-	return e.unit.Done()
 }
 
 // resultChunkAssignment receives an execution result that appears in a finalized incorporating block.
@@ -156,7 +156,8 @@ func (e *Engine) processChunk(chunk *flow.Chunk, resultID flow.Identifier, block
 func (e *Engine) ProcessFinalizedBlock(block *flow.Block) {
 	blockID := block.ID()
 
-	span, ctx, _ := e.tracer.StartBlockSpan(e.unit.Ctx(), blockID, trace.VERProcessFinalizedBlock)
+	// We don't have any existing information and don't need cancellation, so use a background (empty) context
+	span, ctx := e.tracer.StartBlockSpan(context.Background(), blockID, trace.VERProcessFinalizedBlock)
 	defer span.End()
 
 	e.processFinalizedBlock(ctx, block)
@@ -165,6 +166,11 @@ func (e *Engine) ProcessFinalizedBlock(block *flow.Block) {
 // processFinalizedBlock indexes the execution receipts included in the block, performs chunk assignment on its result, and
 // processes the chunks assigned to this verification node by pushing them to the chunks consumer.
 func (e *Engine) processFinalizedBlock(ctx context.Context, block *flow.Block) {
+
+	if e.stopAtHeight > 0 && block.Header.Height == e.stopAtHeight {
+		e.stopAtBlockID.Store(block.ID())
+	}
+
 	blockID := block.ID()
 	// we should always notify block consumer before returning.
 	defer e.blockConsumerNotifier.Notify(blockID)
@@ -200,6 +206,13 @@ func (e *Engine) processFinalizedBlock(ctx context.Context, block *flow.Block) {
 
 		assignedChunksCount += uint64(len(chunkList))
 		for _, chunk := range chunkList {
+
+			if e.stopAtHeight > 0 && e.stopAtBlockID.Load() == chunk.BlockID {
+				resultLog.Fatal().
+					Hex("chunk_id", logging.ID(chunk.ID())).
+					Msgf("Chunk for block at finalized height %d received - stopping node", e.stopAtHeight)
+			}
+
 			processed, err := e.processChunkWithTracing(ctx, chunk, resultID, block.Header.Height)
 			if err != nil {
 				resultLog.Fatal().
@@ -255,13 +268,8 @@ func authorizedAsVerification(state protocol.State, blockID flow.Identifier, ide
 		return false, fmt.Errorf("node has an invalid role. expected: %s, got: %s", flow.RoleVerification, identity.Role)
 	}
 
-	// checks identity has not been ejected
-	if identity.Ejected {
-		return false, nil
-	}
-
-	// checks identity has weight
-	if identity.Weight == 0 {
+	// checks identity is an active epoch participant with positive weight
+	if !filter.IsValidCurrentEpochParticipant(identity) || identity.InitialWeight == 0 {
 		return false, nil
 	}
 

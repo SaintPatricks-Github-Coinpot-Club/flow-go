@@ -1,14 +1,20 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/onflow/flow-go/cmd/bootstrap/gcs"
+	"github.com/onflow/flow-go/cmd/bootstrap/utils"
 	model "github.com/onflow/flow-go/model/bootstrap"
 	"github.com/onflow/flow-go/model/flow"
 )
@@ -29,7 +35,8 @@ func init() {
 func addPullCmdFlags() {
 	pullCmd.Flags().StringVarP(&flagToken, "token", "t", "", "token provided by the Flow team to access the Transit server")
 	pullCmd.Flags().StringVarP(&flagNodeRole, "role", "r", "", `node role (can be "collection", "consensus", "execution", "verification" or "access")`)
-	pullCmd.Flags().DurationVar(&flagTimeout, "timeout", time.Second*300, `timeout for pull, default: 5m`)
+	pullCmd.Flags().DurationVar(&flagTimeout, "timeout", time.Second*300, `timeout for pull`)
+	pullCmd.Flags().Int64Var(&flagConcurrency, "concurrency", 2, `concurrency limit for pull`)
 
 	_ = pullCmd.MarkFlagRequired("token")
 	_ = pullCmd.MarkFlagRequired("role")
@@ -38,9 +45,6 @@ func addPullCmdFlags() {
 // pull keys and metadata from the Google bucket
 func pull(cmd *cobra.Command, args []string) {
 	log.Info().Msg("running pull")
-
-	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
-	defer cancel()
 
 	nodeID, err := readNodeID()
 	if err != nil {
@@ -54,6 +58,15 @@ func pull(cmd *cobra.Command, args []string) {
 
 	// create new bucket instance with Flow Bucket name
 	bucket := gcs.NewGoogleBucket(flagBucketName)
+
+	// bump up the timeout for an execution node if it has not been explicitly set since downloading
+	// root.checkpoint takes a long time
+	if role == flow.RoleExecution && !cmd.Flags().Lookup("timeout").Changed {
+		flagTimeout = time.Hour
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), flagTimeout)
+	defer cancel()
 
 	// initialize a new client to GCS
 	client, err := bucket.NewClient(ctx)
@@ -70,16 +83,33 @@ func pull(cmd *cobra.Command, args []string) {
 	}
 	log.Info().Msgf("found %d files in Google Bucket", len(files))
 
-	// download found files
+	sem := semaphore.NewWeighted(flagConcurrency)
+	wait := sync.WaitGroup{}
 	for _, file := range files {
-		fullOutpath := filepath.Join(flagBootDir, "public-root-information", filepath.Base(file))
+		wait.Add(1)
+		go func(file gcs.GCSFile) {
+			_ = sem.Acquire(ctx, 1)
+			defer func() {
+				sem.Release(1)
+				wait.Done()
+			}()
 
-		log.Info().Str("source", file).Str("dest", fullOutpath).Msgf("downloading file from transit servers")
-		err = bucket.DownloadFile(ctx, client, fullOutpath, file)
-		if err != nil {
-			log.Fatal().Err(err).Msgf("could not download google bucket file")
-		}
+			fullOutpath := filepath.Join(flagBootDir, "public-root-information", filepath.Base(file.Name))
+			fmd5 := utils.CalcMd5(fullOutpath)
+			// only skip files that have an MD5 hash
+			if len(file.MD5) > 0 && bytes.Equal(fmd5, file.MD5) {
+				log.Info().Str("source", file.Name).Str("dest", fullOutpath).Msgf("skipping existing file from transit servers")
+				return
+			}
+			log.Info().Str("source", file.Name).Str("dest", fullOutpath).Msgf("downloading file from transit servers")
+			err = bucket.DownloadFile(ctx, client, fullOutpath, file.Name)
+			if err != nil {
+				log.Fatal().Err(err).Msgf("could not download google bucket file")
+			}
+		}(file)
 	}
+
+	wait.Wait()
 
 	// download any extra files specific to node role
 	extraFiles := getAdditionalFilesToDownload(role, nodeID)
@@ -96,14 +126,30 @@ func pull(cmd *cobra.Command, args []string) {
 
 	// move root checkpoint file if node role is execution
 	if role == flow.RoleExecution {
-		// root.checkpoint is downloaded to <bootstrap folder>/public-root-information after a pull
-		rootCheckpointSrc := filepath.Join(flagBootDir, model.DirnamePublicBootstrap, model.FilenameWALRootCheckpoint)
-		rootCheckpointDst := filepath.Join(flagBootDir, model.PathRootCheckpoint)
 
-		log.Info().Str("src", rootCheckpointSrc).Str("destination", rootCheckpointDst).Msgf("moving file")
-		err := moveFile(rootCheckpointSrc, rootCheckpointDst)
+		// root.checkpoint* is downloaded to <bootstrap folder>/public-root-information after a pull
+		localPublicRootInfoDir := filepath.Join(flagBootDir, model.DirnamePublicBootstrap)
+
+		// move the root.checkpoint, root.checkpoint.0, root.checkpoint.1 etc. files to the bootstrap/execution-state dir
+		err = filepath.WalkDir(localPublicRootInfoDir, func(srcPath string, rootCheckpointFile fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// if rootCheckpointFile is a file whose name starts with "root.checkpoint", then move it
+			if !rootCheckpointFile.IsDir() && strings.HasPrefix(rootCheckpointFile.Name(), model.FilenameWALRootCheckpoint) {
+
+				dstPath := filepath.Join(flagBootDir, model.DirnameExecutionState, rootCheckpointFile.Name())
+				log.Info().Str("src", srcPath).Str("destination", dstPath).Msgf("moving file")
+				err = moveFile(srcPath, dstPath)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to move root.checkpoint")
+			log.Fatal().Err(err).Msg("Failed to move root.checkpoint files")
 		}
 	}
 

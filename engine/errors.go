@@ -22,10 +22,6 @@ type InvalidInputError struct {
 	err error
 }
 
-func NewInvalidInputError(msg string) error {
-	return NewInvalidInputErrorf(msg)
-}
-
 func NewInvalidInputErrorf(msg string, args ...interface{}) error {
 	return InvalidInputError{
 		err: fmt.Errorf(msg, args...),
@@ -44,6 +40,32 @@ func (e InvalidInputError) Error() string {
 func IsInvalidInputError(err error) bool {
 	var errInvalidInputError InvalidInputError
 	return errors.As(err, &errInvalidInputError)
+}
+
+// IsNetworkTransmissionError returns whether the given error is a NetworkTransmissionError error
+func IsNetworkTransmissionError(err error) bool {
+	var errNetworkTransmissionError NetworkTransmissionError
+	return errors.As(err, &errNetworkTransmissionError)
+}
+
+// NetworkTransmissionError captures the general sentinel errors upon network transmission. It is used to distinguish
+// network transmission errors from other errors.
+type NetworkTransmissionError struct {
+	err error
+}
+
+func NewNetworkTransmissionErrorf(msg string, args ...interface{}) error {
+	return NetworkTransmissionError{
+		err: fmt.Errorf(msg, args...),
+	}
+}
+
+func (e NetworkTransmissionError) Unwrap() error {
+	return e.err
+}
+
+func (e NetworkTransmissionError) Error() string {
+	return e.err.Error()
 }
 
 // OutdatedInputError are for inputs that are outdated. An outdated input doesn't mean

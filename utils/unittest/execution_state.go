@@ -4,10 +4,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/onflow/flow-go/crypto"
-	"github.com/onflow/flow-go/crypto/hash"
-
 	"github.com/onflow/cadence"
+	"github.com/onflow/crypto"
+	"github.com/onflow/crypto/hash"
 
 	"github.com/onflow/flow-go/model/flow"
 )
@@ -24,12 +23,12 @@ const ServiceAccountPrivateKeySignAlgo = crypto.ECDSAP256
 const ServiceAccountPrivateKeyHashAlgo = hash.SHA2_256
 
 // Pre-calculated state commitment with root account with the above private key
-const GenesisStateCommitmentHex = "58934da9e4e8d15dae050a07a840f57d569a0c51c8060e41db66b48bfe67d559"
+const GenesisStateCommitmentHex = "bbd4d72c360ae2e1064a4095b7d3427d67adcf4805382972f460bf92c6183edc"
 
 var GenesisStateCommitment flow.StateCommitment
 
 var GenesisTokenSupply = func() cadence.UFix64 {
-	//value, err := cadence.NewUFix64("10000000000.0") // 10 billion
+	// value, err := cadence.NewUFix64("10000000000.0") // 10 billion
 	value, err := cadence.NewUFix64("1000000000.0") // 1 billion
 	if err != nil {
 		panic(fmt.Errorf("invalid genesis token supply: %w", err))
@@ -67,4 +66,31 @@ func init() {
 	// Cannot import virtual machine, due to circular dependency. Just use the value of
 	// fvm.AccountKeyWeightThreshold here
 	ServiceAccountPublicKey = ServiceAccountPrivateKey.PublicKey(1000)
+}
+
+// this is done by printing the state commitment in TestBootstrapLedger test with different chain ID
+func GenesisStateCommitmentByChainID(chainID flow.ChainID) flow.StateCommitment {
+	commitString := genesisCommitHexByChainID(chainID)
+	bytes, err := hex.DecodeString(commitString)
+	if err != nil {
+		panic("error while hex decoding hardcoded state commitment")
+	}
+	commit, err := flow.ToStateCommitment(bytes)
+	if err != nil {
+		panic("genesis state commitment size is invalid")
+	}
+	return commit
+}
+
+func genesisCommitHexByChainID(chainID flow.ChainID) string {
+	if chainID == flow.Mainnet {
+		return GenesisStateCommitmentHex
+	}
+	if chainID == flow.Testnet {
+		return "22d08739804e390ac34accfc11f34a9fef57fd1177a8900bac48aeb2051602cf"
+	}
+	if chainID == flow.Sandboxnet {
+		return "e1c08b17f9e5896f03fe28dd37ca396c19b26628161506924fbf785834646ea1"
+	}
+	return "8bf3f680c0d4b630463cea0102876bcc5f08b205349289f22ed50d6abdb0d22c"
 }

@@ -2,10 +2,10 @@ package testutil
 
 import (
 	"github.com/onflow/cadence"
+	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/interpreter"
 	"github.com/onflow/cadence/runtime"
-	"github.com/onflow/cadence/runtime/common"
-	"github.com/onflow/cadence/runtime/interpreter"
-	"github.com/onflow/cadence/runtime/sema"
+	"github.com/onflow/cadence/sema"
 )
 
 var _ runtime.Runtime = &TestInterpreterRuntime{}
@@ -13,6 +13,10 @@ var _ runtime.Runtime = &TestInterpreterRuntime{}
 type TestInterpreterRuntime struct {
 	ReadStoredFunc     func(address common.Address, path cadence.Path, context runtime.Context) (cadence.Value, error)
 	InvokeContractFunc func(a common.AddressLocation, s string, values []cadence.Value, types []sema.Type, ctx runtime.Context) (cadence.Value, error)
+}
+
+func (t *TestInterpreterRuntime) Config() runtime.Config {
+	panic("Config not defined")
 }
 
 func (t *TestInterpreterRuntime) NewScriptExecutor(script runtime.Script, context runtime.Context) runtime.Executor {
@@ -79,10 +83,6 @@ func (t *TestInterpreterRuntime) ReadStored(address common.Address, path cadence
 		panic("ReadStored not defined")
 	}
 	return t.ReadStoredFunc(address, path, context)
-}
-
-func (t *TestInterpreterRuntime) ReadLinked(common.Address, cadence.Path, runtime.Context) (cadence.Value, error) {
-	panic("ReadLinked not defined")
 }
 
 func (*TestInterpreterRuntime) Storage(runtime.Context) (*runtime.Storage, *interpreter.Interpreter, error) {

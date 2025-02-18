@@ -10,6 +10,7 @@ import (
 )
 
 type CollectionCollector struct {
+	module.TransactionValidationMetrics
 	tracer               module.Tracer
 	transactionsIngested prometheus.Counter       // tracks the number of ingested transactions
 	finalizedHeight      *prometheus.GaugeVec     // tracks the finalized height
@@ -17,11 +18,13 @@ type CollectionCollector struct {
 	guarantees           *prometheus.HistogramVec // counts the number/size of FINALIZED collections
 }
 
+var _ module.CollectionMetrics = (*CollectionCollector)(nil)
+
 func NewCollectionCollector(tracer module.Tracer) *CollectionCollector {
 
 	cc := &CollectionCollector{
-		tracer: tracer,
-
+		TransactionValidationMetrics: NewTransactionValidationCollector(),
+		tracer:                       tracer,
 		transactionsIngested: promauto.NewCounter(prometheus.CounterOpts{
 			Namespace: namespaceCollection,
 			Name:      "ingested_transactions_total",
@@ -49,7 +52,7 @@ func NewCollectionCollector(tracer module.Tracer) *CollectionCollector {
 			Buckets:   []float64{1, 2, 5, 10, 20},
 			Name:      "guarantees_size_transactions",
 			Help:      "size/number of guaranteed/finalized collections",
-		}, []string{LabelChain, LabelProposer}),
+		}, []string{LabelChain}),
 	}
 
 	return cc
@@ -76,15 +79,13 @@ func (cc *CollectionCollector) ClusterBlockProposed(block *cluster.Block) {
 func (cc *CollectionCollector) ClusterBlockFinalized(block *cluster.Block) {
 	collection := block.Payload.Collection.Light()
 	chainID := block.Header.ChainID
-	proposer := block.Header.ProposerID
 
 	cc.finalizedHeight.
 		With(prometheus.Labels{LabelChain: chainID.String()}).
 		Set(float64(block.Header.Height))
 	cc.guarantees.
 		With(prometheus.Labels{
-			LabelChain:    chainID.String(),
-			LabelProposer: proposer.String(),
+			LabelChain: chainID.String(),
 		}).
 		Observe(float64(collection.Len()))
 }

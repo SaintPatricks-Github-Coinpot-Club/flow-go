@@ -18,14 +18,14 @@ var (
 )
 
 // VerifyingVoteProcessorFactory generates hotstuff.VerifyingVoteCollector instances
-type VerifyingVoteProcessorFactory = func(log zerolog.Logger, proposal *model.Proposal) (hotstuff.VerifyingVoteProcessor, error)
+type VerifyingVoteProcessorFactory = func(log zerolog.Logger, proposal *model.SignedProposal) (hotstuff.VerifyingVoteProcessor, error)
 
 // VoteCollector implements a state machine for transition between different states of vote collector
 type VoteCollector struct {
 	sync.Mutex
 	log                      zerolog.Logger
 	workers                  hotstuff.Workers
-	notifier                 hotstuff.Consumer
+	notifier                 hotstuff.VoteAggregationConsumer
 	createVerifyingProcessor VerifyingVoteProcessorFactory
 
 	votesCache     VotesCache
@@ -47,7 +47,7 @@ type atomicValueWrapper struct {
 
 func NewStateMachineFactory(
 	log zerolog.Logger,
-	notifier hotstuff.Consumer,
+	notifier hotstuff.VoteAggregationConsumer,
 	verifyingVoteProcessorFactory VerifyingVoteProcessorFactory,
 ) voteaggregator.NewCollectorFactoryMethod {
 	return func(view uint64, workers hotstuff.Workers) (hotstuff.VoteCollector, error) {
@@ -59,11 +59,11 @@ func NewStateMachine(
 	view uint64,
 	log zerolog.Logger,
 	workers hotstuff.Workers,
-	notifier hotstuff.Consumer,
+	notifier hotstuff.VoteAggregationConsumer,
 	verifyingVoteProcessorFactory VerifyingVoteProcessorFactory,
 ) *VoteCollector {
 	log = log.With().
-		Str("hotstuff", "VoteCollector").
+		Str("component", "hotstuff.vote_collector").
 		Uint64("view", view).
 		Logger()
 	sm := &VoteCollector{
@@ -130,14 +130,15 @@ func (m *VoteCollector) processVote(vote *model.Vote) error {
 		currentState := processor.Status()
 		err := processor.Process(vote)
 		if err != nil {
-			if model.IsInvalidVoteError(err) {
-				m.notifier.OnInvalidVoteDetected(vote)
+			if invalidVoteErr, ok := model.AsInvalidVoteError(err); ok {
+				m.notifier.OnInvalidVoteDetected(*invalidVoteErr)
 				return nil
 			}
 			// ATTENTION: due to how our logic is designed this situation is only possible
 			// where we receive the same vote twice, this is not a case of double voting.
 			// This scenario is possible if leader submits his vote additionally to the vote in proposal.
 			if model.IsDuplicatedSignerError(err) {
+				m.log.Debug().Msgf("duplicated signer %x", vote.SignerID)
 				return nil
 			}
 			return err
@@ -147,6 +148,7 @@ func (m *VoteCollector) processVote(vote *model.Vote) error {
 			continue
 		}
 
+		m.notifier.OnVoteProcessed(vote)
 		return nil
 	}
 }
@@ -173,7 +175,7 @@ func (m *VoteCollector) View() uint64 {
 //	CachingVotes   -> VerifyingVotes
 //	CachingVotes   -> Invalid
 //	VerifyingVotes -> Invalid
-func (m *VoteCollector) ProcessBlock(proposal *model.Proposal) error {
+func (m *VoteCollector) ProcessBlock(proposal *model.SignedProposal) error {
 
 	if proposal.Block.View != m.View() {
 		return fmt.Errorf("this VoteCollector requires a proposal for view %d but received block %v with view %d",
@@ -241,7 +243,7 @@ func (m *VoteCollector) RegisterVoteConsumer(consumer hotstuff.VoteConsumer) {
 // Error returns:
 // * ErrDifferentCollectorState if the VoteCollector's state is _not_ `CachingVotes`
 // * all other errors are unexpected and potential symptoms of internal bugs or state corruption (fatal)
-func (m *VoteCollector) caching2Verifying(proposal *model.Proposal) error {
+func (m *VoteCollector) caching2Verifying(proposal *model.SignedProposal) error {
 	blockID := proposal.Block.BlockID
 	newProc, err := m.createVerifyingProcessor(m.log, proposal)
 	if err != nil {
@@ -274,7 +276,9 @@ func (m *VoteCollector) terminateVoteProcessing() {
 
 // processCachedVotes feeds all cached votes into the VoteProcessor
 func (m *VoteCollector) processCachedVotes(block *model.Block) {
-	for _, vote := range m.votesCache.All() {
+	cachedVotes := m.votesCache.All()
+	m.log.Info().Msgf("processing %d cached votes", len(cachedVotes))
+	for _, vote := range cachedVotes {
 		if vote.BlockID != block.BlockID {
 			continue
 		}

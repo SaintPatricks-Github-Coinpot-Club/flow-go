@@ -5,7 +5,7 @@ linters-settings:
   goimports:
     # put imports beginning with prefix after 3rd-party packages;
     # it's a comma-separated list of prefixes
-    local-prefixes: github.com/onflow/flow-go
+    local-prefixes: github.com/onflow/flow-go/
 
   gosec:
     # To select a subset of rules to run.
@@ -17,6 +17,10 @@ linters-settings:
       - G502
       - G503
       - G505
+
+  staticcheck:
+    # Disable SA1019 to allow use of deprecated label
+    checks: ["all", "-SA1019"]
 
 linters:
   enable:
@@ -31,5 +35,11 @@ issues:
     # typecheck currently not handling the way we do function inheritance well
     # disabling for now
     - path: 'cmd/access/node_build/*' 
+      linters:
+        - typecheck
+    - path: 'cmd/observer/node_builder/*'
+      linters:
+        - typecheck
+    - path: 'follower/*'
       linters:
         - typecheck

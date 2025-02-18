@@ -4,11 +4,17 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/onflow/cadence"
+
 	"github.com/onflow/flow-go/model/flow"
 )
 
 // ErrUnknownReferenceBlock indicates that a transaction references an unknown block.
 var ErrUnknownReferenceBlock = errors.New("unknown reference block")
+
+// IndexReporterNotInitialized is returned when indexReporter is nil because
+// execution data syncing and indexing is disabled
+var IndexReporterNotInitialized = errors.New("index reported not initialized")
 
 // IncompleteTransactionError indicates that a transaction is missing one or more required fields.
 type IncompleteTransactionError struct {
@@ -64,7 +70,7 @@ func (e InvalidAddressError) Error() string {
 // DuplicatedSignatureError indicates that two signatures havs been provided for a key (combination of account and key index)
 type DuplicatedSignatureError struct {
 	Address  flow.Address
-	KeyIndex uint64
+	KeyIndex uint32
 }
 
 func (e DuplicatedSignatureError) Error() string {
@@ -89,4 +95,38 @@ type InvalidTxByteSizeError struct {
 
 func (e InvalidTxByteSizeError) Error() string {
 	return fmt.Sprintf("transaction byte size (%d) exceeds the maximum byte size allowed for a transaction (%d)", e.Actual, e.Maximum)
+}
+
+type InvalidTxRateLimitedError struct {
+	Payer flow.Address
+}
+
+func (e InvalidTxRateLimitedError) Error() string {
+	return fmt.Sprintf("transaction rate limited for payer (%s)", e.Payer)
+}
+
+type InsufficientBalanceError struct {
+	Payer           flow.Address
+	RequiredBalance cadence.UFix64
+}
+
+func (e InsufficientBalanceError) Error() string {
+	return fmt.Sprintf("transaction payer (%s) has insufficient balance to pay transaction fee. "+
+		"Required balance: (%s). ", e.Payer, e.RequiredBalance.String())
+}
+
+func IsInsufficientBalanceError(err error) bool {
+	var balanceError InsufficientBalanceError
+	return errors.As(err, &balanceError)
+}
+
+// IndexedHeightFarBehindError indicates that a node is far behind on indexing.
+type IndexedHeightFarBehindError struct {
+	SealedHeight  uint64
+	IndexedHeight uint64
+}
+
+func (e IndexedHeightFarBehindError) Error() string {
+	return fmt.Sprintf("the difference between the latest sealed height (%d) and indexed height (%d) exceeds the maximum gap allowed",
+		e.SealedHeight, e.IndexedHeight)
 }

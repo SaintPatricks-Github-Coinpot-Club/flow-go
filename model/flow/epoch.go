@@ -8,19 +8,81 @@ import (
 
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/onflow/crypto"
 	"github.com/vmihailenco/msgpack/v4"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 
-	"github.com/onflow/flow-go/crypto"
 	"github.com/onflow/flow-go/model/encodable"
 )
 
-// EpochPhase represents a phase of the Epoch Preparation Protocol. The phase
-// of an epoch is resolved based on a block reference and is fork-dependent.
-// An epoch begins in the staking phase, then transitions to the setup phase in
-// the block containing the EpochSetup service event, then to the committed
-// phase in the block containing the EpochCommit service event.
-// |<--  EpochPhaseStaking -->|<-- EpochPhaseSetup -->|<-- EpochPhaseCommitted -->|<-- EpochPhaseStaking -->...
-// |<------------------------------- Epoch N ------------------------------------>|<-- Epoch N + 1 --...
+// EpochPhase represents a phase of the Epoch Preparation Protocol.
+// The phase of an epoch is resolved based on a block reference and is fork-dependent.
+// During normal operations, each Epoch transitions through the phases:
+//
+//	║                                       Epoch N
+//	║       ╭─────────────────────────────────┴─────────────────────────────────╮
+//	║   finalize view            EpochSetup            EpochCommit
+//	║     in epoch N            service event         service event
+//	║        ⇣                       ⇣                     ⇣
+//	║        ┌─────────────────┐     ┌───────────────┐     ┌───────────────────┐
+//	║        │EpochPhaseStaking├─────►EpochPhaseSetup├─────►EpochPhaseCommitted├ ┄>
+//	║        └─────────────────┘     └───────────────┘     └───────────────────┘
+//	║        ⇣                       ⇣                     ⇣
+//	║   EpochTransition     EpochSetupPhaseStarted    EpochCommittedPhaseStarted
+//	║    Notification            Notification               Notification
+//
+// However, if the Protocol State encounters any unexpected epoch service events, or the subsequent epoch
+// fails to be committed by the `EpochCommitSafetyThreshold`, then we enter Epoch Fallback Mode [EFM].
+// Depending on whether the subsequent epoch has already been committed, the EFM progress differs slightly.
+// In a nutshell, we always enter the _latest_ epoch already committed on the happy path (if there is any)
+// and then follow the fallback protocol.
+//
+// SCENARIO A: the future Epoch N is already committed, when we enter EFM
+//
+//	║      Epoch N-1                            Epoch N
+//	║   ···──┴─────────────────────────╮ ╭─────────────┴───────────────────────────────────────────────╮
+//	║      invalid service                finalize view                   EpochRecover
+//	║            event                    in epoch N                      service event
+//	║              ⇣                      ⇣                    ┊          ⇣
+//	║     ┌──────────────────────────┐    ┌────────────────────┊────┐     ┌───────────────────────────┐
+//	║     │   EpochPhaseCommitted    ├────►    EpochPhaseFallback   ├─────►    EpochPhaseCommitted    ├ ┄>
+//	║     └──────────────────────────┘    └────────────────────┊────┘     └───────────────────────────┘
+//	║              ⇣                      ⇣                    ┊          ⇣
+//	║   EpochFallbackModeTriggered     EpochTransition   EpochExtended*   EpochFallbackModeExited
+//	║          Notification             Notification      Notification    + EpochCommittedPhaseStarted Notifications
+//	║              ┆                                                      ┆
+//	║              ╰┄┄┄┄┄┄┄┄┄┄ EpochFallbackTriggered is true ┄┄┄┄┄┄┄┄┄┄┄┄╯
+//
+// With 'EpochExtended*' we denote that there can be zero, one, or more Epoch Extension (depending on when
+// we receive a valid EpochRecover service event.
+//
+// SCENARIO B: we are in Epoch N without any subsequent epoch being committed when entering EFM
+//
+//	║                         Epoch N
+//	║ ···────────────────────────┴───────────────────────────────────────────────────────────────╮
+//	║              invalid service event or                         EpochRecover
+//	║         EpochCommitSafetyThreshold reached                    service event
+//	║                           ⇣                      ┊            ⇣
+//	║  ┌────────────────────┐   ┌──────────────────────┊──────┐     ┌───────────────────────────┐
+//	║  │ EpochPhaseStaking  │   │     EpochPhaseFallback      │     │   EpochPhaseCommitted     │
+//	║  │ or EpochPhaseSetup ├───►                      ┊      ├─────►                           ├ ┄>
+//	║  └────────────────────┘   └──────────────────────┊──────┘     └───────────────────────────┘
+//	║                           ⇣                      ┊            ⇣
+//	║            EpochFallbackModeTriggered     EpochExtended*      EpochFallbackModeExited
+//	║                     Notification           Notification       + EpochCommittedPhaseStarted Notifications
+//	║                           ┆                                   ┆
+//	║                           ╰┄┄ EpochFallbackTriggered true ┄┄┄┄╯
+//
+// A state machine diagram containing all possible phase transitions is below:
+//
+//	         ┌──────────────────────────────────────────────────────────┐
+//	┌────────▼────────┐     ┌───────────────┐     ┌───────────────────┐ │
+//	│EpochPhaseStaking├─────►EpochPhaseSetup├─────►EpochPhaseCommitted├─┘
+//	└────────┬────────┘     └───────────┬───┘     └───┬──────────▲────┘
+//	         │                        ┌─▼─────────────▼──┐       │
+//	         └────────────────────────►EpochPhaseFallback├───────┘
+//	                                  └──────────────────┘
 type EpochPhase int
 
 const (
@@ -28,6 +90,7 @@ const (
 	EpochPhaseStaking
 	EpochPhaseSetup
 	EpochPhaseCommitted
+	EpochPhaseFallback
 )
 
 func (p EpochPhase) String() string {
@@ -36,6 +99,7 @@ func (p EpochPhase) String() string {
 		"EpochPhaseStaking",
 		"EpochPhaseSetup",
 		"EpochPhaseCommitted",
+		"EpochPhaseFallback",
 	}[p]
 }
 
@@ -45,6 +109,7 @@ func GetEpochPhase(phase string) EpochPhase {
 		EpochPhaseStaking,
 		EpochPhaseSetup,
 		EpochPhaseCommitted,
+		EpochPhaseFallback,
 	}
 	for _, p := range phases {
 		if p.String() == phase {
@@ -62,16 +127,28 @@ const EpochSetupRandomSourceLength = 16
 // EpochSetup is a service event emitted when the network is ready to set up
 // for the upcoming epoch. It contains the participants in the epoch, the
 // length, the cluster assignment, and the seed for leader selection.
+// EpochSetup is a service event emitted when the preparation process for the next epoch begins.
+// EpochSetup events must:
+//   - be emitted exactly once per epoch before the corresponding EpochCommit event
+//   - be emitted prior to the epoch commitment deadline (defined by EpochCommitSafetyThreshold)
+//
+// If either of the above constraints are not met, the service event will be rejected and Epoch Fallback Mode [EFM] will be triggered.
+//
+// When an EpochSetup event is accepted and incorporated into the Protocol State, this triggers the
+// Distributed Key Generation [DKG] and cluster QC voting process for the next epoch.
+// It also causes the current epoch to enter the EpochPhaseSetup phase.
 type EpochSetup struct {
-	Counter            uint64         // the number of the epoch
-	FirstView          uint64         // the first view of the epoch
-	DKGPhase1FinalView uint64         // the final view of DKG phase 1
-	DKGPhase2FinalView uint64         // the final view of DKG phase 2
-	DKGPhase3FinalView uint64         // the final view of DKG phase 3
-	FinalView          uint64         // the final view of the epoch
-	Participants       IdentityList   // all participants of the epoch
-	Assignments        AssignmentList // cluster assignment for the epoch
-	RandomSource       []byte         // source of randomness for epoch-specific setup tasks
+	Counter            uint64               // the number of the epoch being setup (current+1)
+	FirstView          uint64               // the first view of the epoch being setup
+	DKGPhase1FinalView uint64               // the final view of DKG phase 1
+	DKGPhase2FinalView uint64               // the final view of DKG phase 2
+	DKGPhase3FinalView uint64               // the final view of DKG phase 3
+	FinalView          uint64               // the final view of the epoch
+	Participants       IdentitySkeletonList // all participants of the epoch in canonical order
+	Assignments        AssignmentList       // cluster assignment for the epoch
+	RandomSource       []byte               // source of randomness for epoch-specific setup tasks
+	TargetDuration     uint64               // desired real-world duration for the epoch [seconds]
+	TargetEndTime      uint64               // desired real-world end time for the epoch in UNIX time [seconds]
 }
 
 func (setup *EpochSetup) ServiceEvent() ServiceEvent {
@@ -105,7 +182,13 @@ func (setup *EpochSetup) EqualTo(other *EpochSetup) bool {
 	if setup.FinalView != other.FinalView {
 		return false
 	}
-	if !setup.Participants.EqualTo(other.Participants) {
+	if setup.TargetDuration != other.TargetDuration {
+		return false
+	}
+	if setup.TargetEndTime != other.TargetEndTime {
+		return false
+	}
+	if !IdentitySkeletonListEqualTo(setup.Participants, other.Participants) {
 		return false
 	}
 	if !setup.Assignments.EqualTo(other.Assignments) {
@@ -114,14 +197,80 @@ func (setup *EpochSetup) EqualTo(other *EpochSetup) bool {
 	return bytes.Equal(setup.RandomSource, other.RandomSource)
 }
 
-// EpochCommit is a service event emitted when epoch setup has been completed.
-// When an EpochCommit event is emitted, the network is ready to transition to
-// the epoch.
+// EpochRecover service event is emitted when network is in Epoch Fallback Mode(EFM) in an attempt to return to happy path.
+// It contains data from EpochSetup, and EpochCommit events to so replicas can create a committed epoch from which they
+// can continue operating on the happy path.
+type EpochRecover struct {
+	EpochSetup
+	EpochCommit
+}
+
+func (er *EpochRecover) ServiceEvent() ServiceEvent {
+	return ServiceEvent{
+		Type:  ServiceEventRecover,
+		Event: er,
+	}
+}
+
+// ID returns the hash of the event contents.
+func (er *EpochRecover) ID() Identifier {
+	return MakeID(er)
+}
+
+func (er *EpochRecover) EqualTo(other *EpochRecover) bool {
+	if !er.EpochSetup.EqualTo(&other.EpochSetup) {
+		return false
+	}
+	if !er.EpochCommit.EqualTo(&other.EpochCommit) {
+		return false
+	}
+	return true
+}
+
+// EpochCommit is a service event emitted when the preparation process for the next epoch is complete.
+// EpochCommit events must:
+//   - be emitted exactly once per epoch after the corresponding EpochSetup event
+//   - be emitted prior to the epoch commitment deadline (defined by EpochCommitSafetyThreshold)
+//
+// If either of the above constraints are not met, the service event will be rejected and Epoch Fallback Mode [EFM] will be triggered.
+//
+// When an EpochCommit event is accepted and incorporated into the Protocol State, this guarantees that
+// the network will proceed through that epoch's defined view range with its defined committee. It also
+// causes the current epoch to enter the EpochPhaseCommitted phase.
+//
+// TERMINOLOGY NOTE: In the context of the Epoch Preparation Protocol and the EpochCommit event,
+// artifacts produced by the DKG are referred to with the "DKG" prefix (for example, DKGGroupKey).
+// These artifacts are *produced by* the DKG, but used for the Random Beacon. As such, other
+// components refer to these same artifacts with the "RandomBeacon" prefix.
 type EpochCommit struct {
-	Counter            uint64              // the number of the epoch
-	ClusterQCs         []ClusterQCVoteData // quorum certificates for each cluster
-	DKGGroupKey        crypto.PublicKey    // group key from DKG
-	DKGParticipantKeys []crypto.PublicKey  // public keys for DKG participants
+	// Counter is the epoch counter of the epoch being committed
+	Counter uint64
+	// ClusterQCs is an ordered list of root quorum certificates, one per cluster.
+	// EpochCommit.ClustersQCs[i] is the QC for EpochSetup.Assignments[i]
+	ClusterQCs []ClusterQCVoteData
+	// DKGGroupKey is the group public key produced by the DKG associated with this epoch.
+	// It is used to verify Random Beacon signatures for the epoch with counter, Counter.
+	DKGGroupKey crypto.PublicKey
+	// DKGParticipantKeys is a list of public keys, one per DKG participant, ordered by Random Beacon index.
+	// This list is the output of the DKG associated with this epoch.
+	// It is used to verify Random Beacon signatures for the epoch with counter, Counter.
+	// CAUTION: This list may include keys for nodes which do not exist in the consensus committee
+	//          and may NOT include keys for all nodes in the consensus committee.
+	DKGParticipantKeys []crypto.PublicKey
+	// DKGIndexMap is always nil and is not used. This field exists to avoid data-model changes in a future version.
+	// Deprecated: This field is always nil and should not be used (it isn't really deprecated -- "pre-un-deprecated", maybe --
+	// but marking it as such makes Go tooling flag it in a way that is useful for this circumstance)
+	//
+	// TODO(EFM, #6214): Parse this field from service event and make use of it.
+	//                   Here is what the godoc should look like once we do that:
+	// DKGIndexMap is a mapping from node identifier to Random Beacon index.
+	// It has the following invariants:
+	//   - len(DKGParticipantKeys) == len(DKGIndexMap)
+	//   - DKGIndexMap values form the set {0, 1, ..., n-1} where n=len(DKGParticipantKeys)
+	// CAUTION: This mapping may include identifiers for nodes which do not exist in the consensus committee
+	//          and may NOT include identifiers for all nodes in the consensus committee.
+	//
+	DKGIndexMap map[Identifier]int
 }
 
 // ClusterQCVoteData represents the votes for a cluster quorum certificate, as
@@ -281,14 +430,13 @@ func (commit *EpochCommit) EqualTo(other *EpochCommit) bool {
 	if commit.Counter != other.Counter {
 		return false
 	}
-	if len(commit.ClusterQCs) != len(other.ClusterQCs) {
+
+	if !slices.EqualFunc(commit.ClusterQCs, other.ClusterQCs, func(qc1 ClusterQCVoteData, qc2 ClusterQCVoteData) bool {
+		return qc1.EqualTo(&qc2)
+	}) {
 		return false
 	}
-	for i, qc := range commit.ClusterQCs {
-		if !qc.EqualTo(&other.ClusterQCs[i]) {
-			return false
-		}
-	}
+
 	if (commit.DKGGroupKey == nil && other.DKGGroupKey != nil) ||
 		(commit.DKGGroupKey != nil && other.DKGGroupKey == nil) {
 		return false
@@ -296,14 +444,15 @@ func (commit *EpochCommit) EqualTo(other *EpochCommit) bool {
 	if commit.DKGGroupKey != nil && other.DKGGroupKey != nil && !commit.DKGGroupKey.Equals(other.DKGGroupKey) {
 		return false
 	}
-	if len(commit.DKGParticipantKeys) != len(other.DKGParticipantKeys) {
+
+	if !slices.EqualFunc(commit.DKGParticipantKeys, other.DKGParticipantKeys, func(k1 crypto.PublicKey, k2 crypto.PublicKey) bool {
+		return k1.Equals(k2)
+	}) {
 		return false
 	}
 
-	for i, key := range commit.DKGParticipantKeys {
-		if !key.Equals(other.DKGParticipantKeys[i]) {
-			return false
-		}
+	if !maps.Equal(commit.DKGIndexMap, other.DKGIndexMap) {
+		return false
 	}
 
 	return true
@@ -312,7 +461,8 @@ func (commit *EpochCommit) EqualTo(other *EpochCommit) bool {
 // ToDKGParticipantLookup constructs a DKG participant lookup from an identity
 // list and a key list. The identity list must be EXACTLY the same (order and
 // contents) as that used when initializing the corresponding DKG instance.
-func ToDKGParticipantLookup(participants IdentityList, keys []crypto.PublicKey) (map[Identifier]DKGParticipant, error) {
+// TODO(EFM, #6214): Once DKGIndexMap is populated we can remove this and use EpochCommit directly
+func ToDKGParticipantLookup(participants IdentitySkeletonList, keys []crypto.PublicKey) (map[Identifier]DKGParticipant, error) {
 	if len(participants) != len(keys) {
 		return nil, fmt.Errorf("participant list (len=%d) does not match key list (len=%d)", len(participants), len(keys))
 	}
@@ -403,25 +553,6 @@ func (part DKGParticipant) EncodeRLP(w io.Writer) error {
 	return rlp.Encode(w, encodableFromDKGParticipant(part))
 }
 
-// EpochStatus represents the status of the current and next epoch with respect
-// to a reference block. Concretely, it contains the IDs for all relevant
-// service events emitted as of the reference block. Events not yet emitted are
-// represented by ZeroID.
-type EpochStatus struct {
-	PreviousEpoch EventIDs // EpochSetup and EpochCommit events for the previous epoch
-	CurrentEpoch  EventIDs // EpochSetup and EpochCommit events for the current epoch
-	NextEpoch     EventIDs // EpochSetup and EpochCommit events for the next epoch
-}
-
-// Copy returns a copy of the epoch status.
-func (es *EpochStatus) Copy() *EpochStatus {
-	return &EpochStatus{
-		PreviousEpoch: es.PreviousEpoch,
-		CurrentEpoch:  es.CurrentEpoch,
-		NextEpoch:     es.NextEpoch,
-	}
-}
-
 // EventIDs is a container for IDs of epoch service events.
 type EventIDs struct {
 	// SetupID is the ID of the EpochSetup event for the respective Epoch
@@ -430,68 +561,7 @@ type EventIDs struct {
 	CommitID Identifier
 }
 
-func NewEpochStatus(previousSetup, previousCommit, currentSetup, currentCommit, nextSetup, nextCommit Identifier) (*EpochStatus, error) {
-	status := &EpochStatus{
-		PreviousEpoch: EventIDs{
-			SetupID:  previousSetup,
-			CommitID: previousCommit,
-		},
-		CurrentEpoch: EventIDs{
-			SetupID:  currentSetup,
-			CommitID: currentCommit,
-		},
-		NextEpoch: EventIDs{
-			SetupID:  nextSetup,
-			CommitID: nextCommit,
-		},
-	}
-
-	err := status.Check()
-	if err != nil {
-		return nil, err
-	}
-	return status, nil
-}
-
-// Check checks that the status is well-formed, returning an error if it is not.
-// All errors indicate a malformed EpochStatus.
-func (es *EpochStatus) Check() error {
-
-	if es == nil {
-		return fmt.Errorf("nil epoch status")
-	}
-	// must reference either both or neither event IDs for previous epoch
-	if (es.PreviousEpoch.SetupID == ZeroID) != (es.PreviousEpoch.CommitID == ZeroID) {
-		return fmt.Errorf("epoch status with only setup or only commit service event")
-	}
-	// must reference event IDs for current epoch
-	if es.CurrentEpoch.SetupID == ZeroID || es.CurrentEpoch.CommitID == ZeroID {
-		return fmt.Errorf("epoch status with empty current epoch service events")
-	}
-	// must not reference a commit without a setup
-	if es.NextEpoch.SetupID == ZeroID && es.NextEpoch.CommitID != ZeroID {
-		return fmt.Errorf("epoch status with commit but no setup service event")
-	}
-	return nil
-}
-
-// Phase returns the phase for the CURRENT epoch, given this epoch status.
-// All errors indicate a malformed EpochStatus.
-func (es *EpochStatus) Phase() (EpochPhase, error) {
-
-	err := es.Check()
-	if err != nil {
-		return EpochPhaseUndefined, err
-	}
-	if es.NextEpoch.SetupID == ZeroID {
-		return EpochPhaseStaking, nil
-	}
-	if es.NextEpoch.CommitID == ZeroID {
-		return EpochPhaseSetup, nil
-	}
-	return EpochPhaseCommitted, nil
-}
-
-func (es *EpochStatus) HasPrevious() bool {
-	return es.PreviousEpoch.SetupID != ZeroID && es.PreviousEpoch.CommitID != ZeroID
+// ID returns hash of the event IDs.
+func (e *EventIDs) ID() Identifier {
+	return MakeID(e)
 }

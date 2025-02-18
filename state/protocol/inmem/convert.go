@@ -1,7 +1,6 @@
 package inmem
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/onflow/flow-go/model/encodable"
@@ -9,6 +8,8 @@ import (
 	"github.com/onflow/flow-go/model/flow/filter"
 	"github.com/onflow/flow-go/module/signature"
 	"github.com/onflow/flow-go/state/protocol"
+	"github.com/onflow/flow-go/state/protocol/protocol_state"
+	"github.com/onflow/flow-go/state/protocol/protocol_state/kvstore"
 )
 
 // FromSnapshot generates a memory-backed snapshot from the input snapshot.
@@ -16,26 +17,12 @@ import (
 // one that can easily be serialized to disk or to network.
 // TODO error docs
 func FromSnapshot(from protocol.Snapshot) (*Snapshot, error) {
-
 	var (
 		snap EncodableSnapshot
 		err  error
 	)
 
 	// convert top-level fields
-	snap.Head, err = from.Head()
-	if err != nil {
-		return nil, fmt.Errorf("could not get head: %w", err)
-	}
-	snap.Identities, err = from.Identities(filter.Any)
-	if err != nil {
-		return nil, fmt.Errorf("could not get identities: %w", err)
-	}
-	snap.LatestResult, snap.LatestSeal, err = from.SealedResult()
-	if err != nil {
-		return nil, fmt.Errorf("could not get seal: %w", err)
-	}
-
 	snap.SealingSegment, err = from.SealingSegment()
 	if err != nil {
 		return nil, fmt.Errorf("could not get sealing segment: %w", err)
@@ -43,37 +30,6 @@ func FromSnapshot(from protocol.Snapshot) (*Snapshot, error) {
 	snap.QuorumCertificate, err = from.QuorumCertificate()
 	if err != nil {
 		return nil, fmt.Errorf("could not get qc: %w", err)
-	}
-	snap.Phase, err = from.Phase()
-	if err != nil {
-		return nil, fmt.Errorf("could not get phase: %w", err)
-	}
-
-	// convert epochs
-	previous, err := FromEpoch(from.Epochs().Previous())
-	// it is possible for valid snapshots to have no previous epoch
-	if errors.Is(err, protocol.ErrNoPreviousEpoch) {
-		snap.Epochs.Previous = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("could not get previous epoch: %w", err)
-	} else {
-		snap.Epochs.Previous = &previous.enc
-	}
-
-	current, err := FromEpoch(from.Epochs().Current())
-	if err != nil {
-		return nil, fmt.Errorf("could not get current epoch: %w", err)
-	}
-	snap.Epochs.Current = current.enc
-
-	next, err := FromEpoch(from.Epochs().Next())
-	// it is possible for valid snapshots to have no next epoch
-	if errors.Is(err, protocol.ErrNextEpochNotSetup) {
-		snap.Epochs.Next = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("could not get next epoch: %w", err)
-	} else {
-		snap.Epochs.Next = &next.enc
 	}
 
 	// convert global state parameters
@@ -83,142 +39,50 @@ func FromSnapshot(from protocol.Snapshot) (*Snapshot, error) {
 	}
 	snap.Params = params.enc
 
+	// convert version beacon
+	versionBeacon, err := from.VersionBeacon()
+	if err != nil {
+		return nil, fmt.Errorf("could not get version beacon: %w", err)
+	}
+
+	snap.SealedVersionBeacon = versionBeacon
+
 	return &Snapshot{snap}, nil
 }
 
 // FromParams converts any protocol.GlobalParams to a memory-backed Params.
 // TODO error docs
 func FromParams(from protocol.GlobalParams) (*Params, error) {
-
-	var (
-		params EncodableParams
-		err    error
-	)
-
-	params.ChainID, err = from.ChainID()
-	if err != nil {
-		return nil, fmt.Errorf("could not get chain id: %w", err)
+	params := EncodableParams{
+		ChainID:              from.ChainID(),
+		SporkID:              from.SporkID(),
+		SporkRootBlockHeight: from.SporkRootBlockHeight(),
+		ProtocolVersion:      from.ProtocolVersion(),
 	}
-	params.SporkID, err = from.SporkID()
-	if err != nil {
-		return nil, fmt.Errorf("could not get spork id: %w", err)
-	}
-	params.ProtocolVersion, err = from.ProtocolVersion()
-	if err != nil {
-		return nil, fmt.Errorf("could not get protocol version: %w", err)
-	}
-
 	return &Params{params}, nil
-}
-
-// FromEpoch converts any protocol.Epoch to a memory-backed Epoch.
-// Error returns:
-// * protocol.ErrNoPreviousEpoch - if the epoch represents a previous epoch which does not exist.
-// * protocol.ErrNextEpochNotSetup - if the epoch represents a next epoch which has not been set up.
-// * state.ErrUnknownSnapshotReference - if the epoch is queried from an unresolvable snapshot.
-func FromEpoch(from protocol.Epoch) (*Epoch, error) {
-
-	var (
-		epoch EncodableEpoch
-		err   error
-	)
-
-	// convert top-level fields
-	epoch.Counter, err = from.Counter()
-	if err != nil {
-		return nil, fmt.Errorf("could not get counter: %w", err)
-	}
-	epoch.InitialIdentities, err = from.InitialIdentities()
-	if err != nil {
-		return nil, fmt.Errorf("could not get initial identities: %w", err)
-	}
-	epoch.FirstView, err = from.FirstView()
-	if err != nil {
-		return nil, fmt.Errorf("could not get first view: %w", err)
-	}
-	epoch.FinalView, err = from.FinalView()
-	if err != nil {
-		return nil, fmt.Errorf("could not get final view: %w", err)
-	}
-	epoch.RandomSource, err = from.RandomSource()
-	if err != nil {
-		return nil, fmt.Errorf("could not get random source: %w", err)
-	}
-	epoch.DKGPhase1FinalView, epoch.DKGPhase2FinalView, epoch.DKGPhase3FinalView, err = protocol.DKGPhaseViews(from)
-	if err != nil {
-		return nil, fmt.Errorf("could not get dkg final views")
-	}
-	clustering, err := from.Clustering()
-	if err != nil {
-		return nil, fmt.Errorf("could not get clustering: %w", err)
-	}
-	epoch.Clustering = clustering
-
-	// convert dkg
-	dkg, err := from.DKG()
-	// if this epoch hasn't been committed yet, return the epoch as-is
-	if errors.Is(err, protocol.ErrEpochNotCommitted) {
-		return &Epoch{epoch}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("could not get dkg: %w", err)
-	}
-	convertedDKG, err := FromDKG(dkg, epoch.InitialIdentities.Filter(filter.HasRole(flow.RoleConsensus)))
-	if err != nil {
-		return nil, err
-	}
-	epoch.DKG = &convertedDKG.enc
-
-	// convert clusters
-	for index := range clustering {
-		cluster, err := from.Cluster(uint(index))
-		if err != nil {
-			return nil, fmt.Errorf("could not get cluster %d: %w", index, err)
-		}
-		convertedCluster, err := FromCluster(cluster)
-		if err != nil {
-			return nil, fmt.Errorf("could not convert cluster %d: %w", index, err)
-		}
-		epoch.Clusters = append(epoch.Clusters, convertedCluster.enc)
-	}
-
-	return &Epoch{epoch}, nil
-}
-
-// FromCluster converts any protocol.Cluster to a memory-backed Cluster.
-// No errors are expected during normal operation.
-func FromCluster(from protocol.Cluster) (*Cluster, error) {
-	cluster := EncodableCluster{
-		Counter:   from.EpochCounter(),
-		Index:     from.Index(),
-		Members:   from.Members(),
-		RootBlock: from.RootBlock(),
-		RootQC:    from.RootQC(),
-	}
-	return &Cluster{cluster}, nil
-}
-
-// FromDKG converts any protocol.DKG to a memory-backed DKG.
-//
-// The given participant list must exactly match the DKG members.
-// All errors indicate inconsistent or invalid inputs.
-// No errors are expected during normal operation.
-func FromDKG(from protocol.DKG, participants flow.IdentityList) (*DKG, error) {
-	var dkg EncodableDKG
-	dkg.GroupKey = encodable.RandomBeaconPubKey{PublicKey: from.GroupKey()}
-
-	lookup, err := protocol.ToDKGParticipantLookup(from, participants)
-	if err != nil {
-		return nil, fmt.Errorf("could not generate dkg participant lookup: %w", err)
-	}
-	dkg.Participants = lookup
-
-	return &DKG{dkg}, nil
 }
 
 // DKGFromEncodable returns a DKG backed by the given encodable representation.
 func DKGFromEncodable(enc EncodableDKG) (*DKG, error) {
 	return &DKG{enc}, nil
+}
+
+// EncodableDKGFromEvents returns an EncodableDKG constructed from epoch setup and commit events.
+// No errors are expected during normal operations.
+func EncodableDKGFromEvents(setup *flow.EpochSetup, commit *flow.EpochCommit) (EncodableDKG, error) {
+	// filter initial participants to valid DKG participants
+	participants := setup.Participants.Filter(filter.IsValidDKGParticipant)
+	lookup, err := flow.ToDKGParticipantLookup(participants, commit.DKGParticipantKeys)
+	if err != nil {
+		return EncodableDKG{}, fmt.Errorf("could not construct dkg lookup: %w", err)
+	}
+
+	return EncodableDKG{
+		GroupKey: encodable.RandomBeaconPubKey{
+			PublicKey: commit.DKGGroupKey,
+		},
+		Participants: lookup,
+	}, nil
 }
 
 // ClusterFromEncodable returns a Cluster backed by the given encodable representation.
@@ -230,19 +94,26 @@ func ClusterFromEncodable(enc EncodableCluster) (*Cluster, error) {
 // root bootstrap state. This is used to bootstrap the protocol state for
 // genesis or post-spork states.
 func SnapshotFromBootstrapState(root *flow.Block, result *flow.ExecutionResult, seal *flow.Seal, qc *flow.QuorumCertificate) (*Snapshot, error) {
-	return SnapshotFromBootstrapStateWithProtocolVersion(root, result, seal, qc, flow.DefaultProtocolVersion)
+	version := flow.DefaultProtocolVersion
+	safetyParams, err := protocol.DefaultEpochSafetyParams(root.Header.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("could not get default epoch commit safety threshold: %w", err)
+	}
+	return SnapshotFromBootstrapStateWithParams(root, result, seal, qc, version, func(epochStateID flow.Identifier) (protocol_state.KVStoreAPI, error) {
+		return kvstore.NewDefaultKVStore(safetyParams.FinalizationSafetyThreshold, safetyParams.EpochExtensionViewCount, epochStateID)
+	})
 }
 
-// SnapshotFromBootstrapStateWithProtocolVersion is SnapshotFromBootstrapState
+// SnapshotFromBootstrapStateWithParams is SnapshotFromBootstrapState
 // with a caller-specified protocol version.
-func SnapshotFromBootstrapStateWithProtocolVersion(
+func SnapshotFromBootstrapStateWithParams(
 	root *flow.Block,
 	result *flow.ExecutionResult,
 	seal *flow.Seal,
 	qc *flow.QuorumCertificate,
-	version uint,
+	protocolVersion uint,
+	kvStoreFactory func(epochStateID flow.Identifier) (protocol_state.KVStoreAPI, error),
 ) (*Snapshot, error) {
-
 	setup, ok := result.ServiceEvents[0].Event.(*flow.EpochSetup)
 	if !ok {
 		return nil, fmt.Errorf("invalid setup event type (%T)", result.ServiceEvents[0].Event)
@@ -273,35 +144,90 @@ func SnapshotFromBootstrapStateWithProtocolVersion(
 		}
 	}
 
-	current, err := NewCommittedEpoch(setup, commit)
-	if err != nil {
-		return nil, fmt.Errorf("could not convert epoch: %w", err)
-	}
-	epochs := EncodableEpochs{
-		Current: current.enc,
+	params := EncodableParams{
+		ChainID:              root.Header.ChainID, // chain ID must match the root block
+		SporkID:              root.ID(),           // use root block ID as the unique spork identifier
+		SporkRootBlockHeight: root.Header.Height,  // use root block height as the spork root block height
+		ProtocolVersion:      protocolVersion,     // major software version for this spork
 	}
 
-	params := EncodableParams{
-		ChainID:         root.Header.ChainID, // chain ID must match the root block
-		SporkID:         root.ID(),           // use root block ID as the unique spork identifier
-		ProtocolVersion: version,             // major software version for this spork
+	rootMinEpochState := EpochProtocolStateFromServiceEvents(setup, commit)
+	rootEpochStateID := rootMinEpochState.ID()
+	rootKvStore, err := kvStoreFactory(rootEpochStateID)
+	if err != nil {
+		return nil, fmt.Errorf("could not construct root kvstore: %w", err)
+	}
+	if rootKvStore.ID() != root.Payload.ProtocolStateID {
+		return nil, fmt.Errorf("incorrect protocol state ID in root block, expected (%x) but got (%x)",
+			root.Payload.ProtocolStateID, rootKvStore.ID())
+	}
+	kvStoreVersion, kvStoreData, err := rootKvStore.VersionedEncode()
+	if err != nil {
+		return nil, fmt.Errorf("could not encode kvstore: %w", err)
+	}
+
+	rootEpochState, err := flow.NewEpochStateEntry(rootMinEpochState, nil, nil, setup, commit, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not construct root epoch state entry: %w", err)
+	}
+	richRootEpochState, err := flow.NewRichEpochStateEntry(rootEpochState)
+	if err != nil {
+		return nil, fmt.Errorf("could not construct root rich epoch state entry: %w", err)
+	}
+
+	rootProtocolStateEntryWrapper := &flow.ProtocolStateEntryWrapper{
+		KVStore: flow.PSKeyValueStoreData{
+			Version: kvStoreVersion,
+			Data:    kvStoreData,
+		},
+		EpochEntry: richRootEpochState,
 	}
 
 	snap := SnapshotFromEncodable(EncodableSnapshot{
-		Head:         root.Header,
-		Identities:   setup.Participants,
-		LatestSeal:   seal,
-		LatestResult: result,
 		SealingSegment: &flow.SealingSegment{
 			Blocks:           []*flow.Block{root},
 			ExecutionResults: flow.ExecutionResultList{result},
 			LatestSeals:      map[flow.Identifier]flow.Identifier{root.ID(): seal.ID()},
-			FirstSeal:        seal,
+			ProtocolStateEntries: map[flow.Identifier]*flow.ProtocolStateEntryWrapper{
+				rootKvStore.ID(): rootProtocolStateEntryWrapper,
+			},
+			FirstSeal:   seal,
+			ExtraBlocks: make([]*flow.Block, 0),
 		},
-		QuorumCertificate: qc,
-		Phase:             flow.EpochPhaseStaking,
-		Epochs:            epochs,
-		Params:            params,
+		QuorumCertificate:   qc,
+		Params:              params,
+		SealedVersionBeacon: nil,
 	})
+
 	return snap, nil
+}
+
+// EpochProtocolStateFromServiceEvents generates a protocol.MinEpochStateEntry for a root protocol state which is used for bootstrapping.
+//
+// CONTEXT: The EpochSetup event contains the IdentitySkeletons for each participant, thereby specifying active epoch members.
+// While ejection status is not part of the EpochSetup event, we can supplement this information as follows:
+//   - Per convention, service events are delivered (asynchronously) in an *order-preserving* manner. Furthermore,
+//     node ejection is also mediated by system smart contracts and delivered via service events.
+//   - Therefore, the EpochSetup event contains the up-to-date snapshot of the epoch participants. Any node ejection
+//     that happened before should be reflected in the EpochSetup event. Specifically, ejected
+//     nodes should be no longer listed in the EpochSetup event.
+//     Hence, when the EpochSetup event is emitted / processed, the ejected flag is false for all epoch participants.
+func EpochProtocolStateFromServiceEvents(setup *flow.EpochSetup, commit *flow.EpochCommit) *flow.MinEpochStateEntry {
+	identities := make(flow.DynamicIdentityEntryList, 0, len(setup.Participants))
+	for _, identity := range setup.Participants {
+		identities = append(identities, &flow.DynamicIdentityEntry{
+			NodeID:  identity.NodeID,
+			Ejected: false,
+		})
+	}
+	return &flow.MinEpochStateEntry{
+		PreviousEpoch: nil,
+		CurrentEpoch: flow.EpochStateContainer{
+			SetupID:          setup.ID(),
+			CommitID:         commit.ID(),
+			ActiveIdentities: identities,
+		},
+		NextEpoch:              nil,
+		EpochFallbackTriggered: false,
+	}
 }

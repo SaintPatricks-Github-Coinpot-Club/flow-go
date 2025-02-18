@@ -17,15 +17,18 @@ type Params interface {
 // different instance params.
 type InstanceParams interface {
 
-	// Root returns the root header of the current protocol state. This will be
+	// FinalizedRoot returns the finalized root header of the current protocol state. This will be
 	// the head of the protocol state snapshot used to bootstrap this state and
 	// may differ from node to node for the same protocol state.
-	Root() (*flow.Header, error)
+	FinalizedRoot() *flow.Header
 
-	// Seal returns the root block seal of the current protocol state. This will be
-	// the seal for the root block used to bootstrap this state and may differ from
-	// node to node for the same protocol state.
-	Seal() (*flow.Seal, error)
+	// SealedRoot returns the sealed root block. If it's different from FinalizedRoot() block,
+	// it means the node is bootstrapped from mid-spork.
+	SealedRoot() *flow.Header
+
+	// Seal returns the root block seal of the current protocol state. This is the seal for the
+	// `SealedRoot` block that was used to bootstrap this state. It may differ from node to node.
+	Seal() *flow.Seal
 }
 
 // GlobalParams represents protocol state parameters that do not vary between instances.
@@ -35,14 +38,20 @@ type GlobalParams interface {
 
 	// ChainID returns the chain ID for the current Flow network. The chain ID
 	// uniquely identifies a Flow network in perpetuity across epochs and sporks.
-	ChainID() (flow.ChainID, error)
+	ChainID() flow.ChainID
 
 	// SporkID returns the unique identifier for this network within the current spork.
 	// This ID is determined at the beginning of a spork during bootstrapping and is
 	// part of the root protocol state snapshot.
-	SporkID() (flow.Identifier, error)
+	SporkID() flow.Identifier
+
+	// SporkRootBlockHeight returns the height of the spork's root block.
+	// This value is determined at the beginning of a spork during bootstrapping.
+	// If node uses a sealing segment for bootstrapping then this value will be carried over
+	// as part of snapshot.
+	SporkRootBlockHeight() uint64
 
 	// ProtocolVersion returns the protocol version, the major software version
 	// of the protocol software.
-	ProtocolVersion() (uint, error)
+	ProtocolVersion() uint
 }

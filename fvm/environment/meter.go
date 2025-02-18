@@ -3,20 +3,21 @@ package environment
 import (
 	"context"
 
-	"github.com/onflow/cadence/runtime/common"
+	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/runtime"
 
 	"github.com/onflow/flow-go/fvm/errors"
-	"github.com/onflow/flow-go/fvm/state"
+	"github.com/onflow/flow-go/fvm/meter"
+	"github.com/onflow/flow-go/fvm/storage/state"
 )
 
 const (
 	// [2_000, 3_000) reserved for the FVM
-	_ common.ComputationKind = iota + 2_000
-	ComputationKindHash
+	ComputationKindHash = 2001 + iota
 	ComputationKindVerifySignature
 	ComputationKindAddAccountKey
 	ComputationKindAddEncodedAccountKey
-	ComputationKindAllocateStorageIndex
+	ComputationKindAllocateSlabIndex
 	ComputationKindCreateAccount
 	ComputationKindEmitEvent
 	ComputationKindGenerateUUID
@@ -28,38 +29,62 @@ const (
 	ComputationKindGetBlockAtHeight
 	ComputationKindGetCode
 	ComputationKindGetCurrentBlockHeight
-	ComputationKindGetProgram
+	_
 	ComputationKindGetStorageCapacity
 	ComputationKindGetStorageUsed
 	ComputationKindGetValue
 	ComputationKindRemoveAccountContractCode
 	ComputationKindResolveLocation
 	ComputationKindRevokeAccountKey
-	ComputationKindRevokeEncodedAccountKey
-	ComputationKindSetProgram
+	_ // removed, DO NOT REUSE
+	_ // removed, DO NOT REUSE
 	ComputationKindSetValue
 	ComputationKindUpdateAccountContractCode
 	ComputationKindValidatePublicKey
 	ComputationKindValueExists
+	ComputationKindAccountKeysCount
+	ComputationKindBLSVerifyPOP
+	ComputationKindBLSAggregateSignatures
+	ComputationKindBLSAggregatePublicKeys
+	ComputationKindGetOrLoadProgram
+	ComputationKindGenerateAccountLocalID
+	ComputationKindGetRandomSourceHistory
+	ComputationKindEVMGasUsage
+	ComputationKindRLPEncoding
+	ComputationKindRLPDecoding
+	ComputationKindEncodeEvent
+	_
+	ComputationKindEVMEncodeABI
+	ComputationKindEVMDecodeABI
 )
 
-type Meter interface {
-	MeterComputation(common.ComputationKind, uint) error
-	ComputationUsed() uint64
+// MainnetExecutionEffortWeights are the execution effort weights as they are
+// on mainnet from crescendo spork
+var MainnetExecutionEffortWeights = meter.ExecutionEffortWeights{
+	common.ComputationKindStatement:          314,
+	common.ComputationKindLoop:               314,
+	common.ComputationKindFunctionInvocation: 314,
+	ComputationKindGetValue:                  162,
+	ComputationKindCreateAccount:             567534,
+	ComputationKindSetValue:                  153,
+	ComputationKindEVMGasUsage:               13,
+}
 
-	MeterMemory(usage common.MemoryUsage) error
-	MemoryEstimate() uint64
+type Meter interface {
+	runtime.MeterInterface
+
+	ComputationIntensities() meter.MeteredComputationIntensities
+	ComputationAvailable(common.ComputationKind, uint) bool
 
 	MeterEmittedEvent(byteSize uint64) error
 	TotalEmittedEventBytes() uint64
-	TotalEventCounter() uint32
 }
 
 type meterImpl struct {
-	txnState *state.TransactionState
+	txnState state.NestedTransactionPreparer
 }
 
-func NewMeter(txnState *state.TransactionState) Meter {
+func NewMeter(txnState state.NestedTransactionPreparer) Meter {
 	return &meterImpl{
 		txnState: txnState,
 	}
@@ -69,40 +94,46 @@ func (meter *meterImpl) MeterComputation(
 	kind common.ComputationKind,
 	intensity uint,
 ) error {
-	if meter.txnState.EnforceLimits() {
-		return meter.txnState.MeterComputation(kind, intensity)
-	}
-	return nil
+	return meter.txnState.MeterComputation(kind, intensity)
 }
 
-func (meter *meterImpl) ComputationUsed() uint64 {
-	return uint64(meter.txnState.TotalComputationUsed())
+func (meter *meterImpl) ComputationIntensities() meter.MeteredComputationIntensities {
+	return meter.txnState.ComputationIntensities()
+}
+
+func (meter *meterImpl) ComputationAvailable(
+	kind common.ComputationKind,
+	intensity uint,
+) bool {
+	return meter.txnState.ComputationAvailable(kind, intensity)
+}
+
+func (meter *meterImpl) ComputationRemaining(kind common.ComputationKind) uint {
+	return meter.txnState.ComputationRemaining(kind)
+}
+
+func (meter *meterImpl) ComputationUsed() (uint64, error) {
+	return meter.txnState.TotalComputationUsed(), nil
 }
 
 func (meter *meterImpl) MeterMemory(usage common.MemoryUsage) error {
-	if meter.txnState.EnforceLimits() {
-		return meter.txnState.MeterMemory(usage.Kind, uint(usage.Amount))
-	}
-	return nil
+	return meter.txnState.MeterMemory(usage.Kind, uint(usage.Amount))
 }
 
-func (meter *meterImpl) MemoryEstimate() uint64 {
-	return meter.txnState.TotalMemoryEstimate()
+func (meter *meterImpl) MemoryUsed() (uint64, error) {
+	return meter.txnState.TotalMemoryEstimate(), nil
+}
+
+func (meter *meterImpl) InteractionUsed() (uint64, error) {
+	return meter.txnState.InteractionUsed(), nil
 }
 
 func (meter *meterImpl) MeterEmittedEvent(byteSize uint64) error {
-	if meter.txnState.EnforceLimits() {
-		return meter.txnState.MeterEmittedEvent(byteSize)
-	}
-	return nil
+	return meter.txnState.MeterEmittedEvent(byteSize)
 }
 
 func (meter *meterImpl) TotalEmittedEventBytes() uint64 {
 	return meter.txnState.TotalEmittedEventBytes()
-}
-
-func (meter *meterImpl) TotalEventCounter() uint32 {
-	return meter.txnState.TotalEventCounter()
 }
 
 type cancellableMeter struct {
@@ -113,7 +144,7 @@ type cancellableMeter struct {
 
 func NewCancellableMeter(
 	ctx context.Context,
-	txnState *state.TransactionState,
+	txnState state.NestedTransactionPreparer,
 ) Meter {
 	return &cancellableMeter{
 		meterImpl: meterImpl{

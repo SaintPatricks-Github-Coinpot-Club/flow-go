@@ -19,7 +19,7 @@ import (
 func TestVoteProcessorFactory_CreateWithValidProposal(t *testing.T) {
 	mockedFactory := mockhotstuff.VoteProcessorFactory{}
 
-	proposal := helper.MakeProposal()
+	proposal := helper.MakeSignedProposal()
 	mockedProcessor := &mockhotstuff.VerifyingVoteProcessor{}
 	mockedProcessor.On("Process", proposal.ProposerVote()).Return(nil).Once()
 	mockedFactory.On("Create", unittest.Logger(), proposal).Return(mockedProcessor, nil).Once()
@@ -44,7 +44,7 @@ func TestVoteProcessorFactory_CreateWithInvalidVote(t *testing.T) {
 	mockedFactory := mockhotstuff.VoteProcessorFactory{}
 
 	t.Run("invalid-vote", func(t *testing.T) {
-		proposal := helper.MakeProposal()
+		proposal := helper.MakeSignedProposal()
 		mockedProcessor := &mockhotstuff.VerifyingVoteProcessor{}
 		mockedProcessor.On("Process", proposal.ProposerVote()).Return(model.NewInvalidVoteErrorf(proposal.ProposerVote(), "")).Once()
 		mockedFactory.On("Create", unittest.Logger(), proposal).Return(mockedProcessor, nil).Once()
@@ -58,12 +58,12 @@ func TestVoteProcessorFactory_CreateWithInvalidVote(t *testing.T) {
 		processor, err := voteProcessorFactory.Create(unittest.Logger(), proposal)
 		require.Error(t, err)
 		require.Nil(t, processor)
-		require.True(t, model.IsInvalidBlockError(err))
+		require.True(t, model.IsInvalidProposalError(err))
 
 		mockedProcessor.AssertExpectations(t)
 	})
 	t.Run("process-vote-exception", func(t *testing.T) {
-		proposal := helper.MakeProposal()
+		proposal := helper.MakeSignedProposal()
 		mockedProcessor := &mockhotstuff.VerifyingVoteProcessor{}
 		exception := errors.New("process-exception")
 		mockedProcessor.On("Process", proposal.ProposerVote()).Return(exception).Once()
@@ -80,7 +80,7 @@ func TestVoteProcessorFactory_CreateWithInvalidVote(t *testing.T) {
 		require.ErrorIs(t, err, exception)
 		require.Nil(t, processor)
 		// an unexpected exception should _not_ be interpreted as the block being invalid
-		require.False(t, model.IsInvalidBlockError(err))
+		require.False(t, model.IsInvalidProposalError(err))
 
 		mockedProcessor.AssertExpectations(t)
 	})
@@ -93,7 +93,7 @@ func TestVoteProcessorFactory_CreateWithInvalidVote(t *testing.T) {
 func TestVoteProcessorFactory_CreateProcessException(t *testing.T) {
 	mockedFactory := mockhotstuff.VoteProcessorFactory{}
 
-	proposal := helper.MakeProposal()
+	proposal := helper.MakeSignedProposal()
 	exception := errors.New("create-exception")
 
 	mockedFactory.On("Create", unittest.Logger(), proposal).Return(nil, exception).Once()
@@ -107,7 +107,7 @@ func TestVoteProcessorFactory_CreateProcessException(t *testing.T) {
 	require.ErrorIs(t, err, exception)
 	require.Nil(t, processor)
 	// an unexpected exception should _not_ be interpreted as the block being invalid
-	require.False(t, model.IsInvalidBlockError(err))
+	require.False(t, model.IsInvalidProposalError(err))
 
 	mockedFactory.AssertExpectations(t)
 }

@@ -4,15 +4,18 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/dgraph-io/badger/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/flow-go/engine/execution/state"
 	"github.com/onflow/flow-go/engine/execution/state/bootstrap"
-	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/engine/execution/testutil"
 	"github.com/onflow/flow-go/module/metrics"
 	"github.com/onflow/flow-go/module/trace"
 	bstorage "github.com/onflow/flow-go/storage/badger"
+	"github.com/onflow/flow-go/storage/operation/pebbleimpl"
+	"github.com/onflow/flow-go/storage/store"
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
@@ -20,109 +23,132 @@ import (
 // save again should still work
 func TestReExecuteBlock(t *testing.T) {
 	unittest.RunWithBadgerDB(t, func(db *badger.DB) {
+		unittest.RunWithPebbleDB(t, func(pdb *pebble.DB) {
 
-		// bootstrap to init highest executed height
-		bootstrapper := bootstrap.NewBootstrapper(unittest.Logger())
-		genesis := unittest.BlockHeaderFixture()
-		err := bootstrapper.BootstrapExecutionDatabase(db, unittest.StateCommitmentFixture(), genesis)
-		require.NoError(t, err)
+			// bootstrap to init highest executed height
+			bootstrapper := bootstrap.NewBootstrapper(unittest.Logger())
+			genesis := unittest.BlockHeaderFixture()
+			rootSeal := unittest.Seal.Fixture(unittest.Seal.WithBlock(genesis))
+			err := bootstrapper.BootstrapExecutionDatabase(db, rootSeal)
+			require.NoError(t, err)
 
-		// create all modules
-		metrics := &metrics.NoopCollector{}
+			// create all modules
+			metrics := &metrics.NoopCollector{}
 
-		headers := bstorage.NewHeaders(metrics, db)
-		txResults := bstorage.NewTransactionResults(metrics, db, bstorage.DefaultCacheSize)
-		commits := bstorage.NewCommits(metrics, db)
-		chunkDataPacks := bstorage.NewChunkDataPacks(metrics, db, bstorage.NewCollections(db, bstorage.NewTransactions(metrics, db)), bstorage.DefaultCacheSize)
-		results := bstorage.NewExecutionResults(metrics, db)
-		receipts := bstorage.NewExecutionReceipts(metrics, db, results, bstorage.DefaultCacheSize)
-		myReceipts := bstorage.NewMyExecutionReceipts(metrics, db, receipts)
-		events := bstorage.NewEvents(metrics, db)
-		serviceEvents := bstorage.NewServiceEvents(metrics, db)
-		transactions := bstorage.NewTransactions(metrics, db)
-		collections := bstorage.NewCollections(db, transactions)
+			headers := bstorage.NewHeaders(metrics, db)
+			txResults := bstorage.NewTransactionResults(metrics, db, bstorage.DefaultCacheSize)
+			commits := bstorage.NewCommits(metrics, db)
+			chunkDataPacks := store.NewChunkDataPacks(metrics, pebbleimpl.ToDB(pdb), bstorage.NewCollections(db, bstorage.NewTransactions(metrics, db)), bstorage.DefaultCacheSize)
+			results := bstorage.NewExecutionResults(metrics, db)
+			receipts := bstorage.NewExecutionReceipts(metrics, db, results, bstorage.DefaultCacheSize)
+			myReceipts := bstorage.NewMyExecutionReceipts(metrics, db, receipts)
+			events := bstorage.NewEvents(metrics, db)
+			serviceEvents := bstorage.NewServiceEvents(metrics, db)
+			transactions := bstorage.NewTransactions(metrics, db)
+			collections := bstorage.NewCollections(db, transactions)
 
-		err = headers.Store(genesis)
-		require.NoError(t, err)
+			err = headers.Store(genesis)
+			require.NoError(t, err)
 
-		// create execution state module
-		es := state.NewExecutionState(
-			nil,
-			commits,
-			nil,
-			headers,
-			collections,
-			chunkDataPacks,
-			results,
-			myReceipts,
-			events,
-			serviceEvents,
-			txResults,
-			db,
-			trace.NewNoopTracer(),
-		)
-		require.NotNil(t, es)
+			// create execution state module
+			es := state.NewExecutionState(
+				nil,
+				commits,
+				nil,
+				headers,
+				collections,
+				chunkDataPacks,
+				results,
+				myReceipts,
+				events,
+				serviceEvents,
+				txResults,
+				db,
+				trace.NewNoopTracer(),
+				nil,
+				false,
+			)
+			require.NotNil(t, es)
 
-		// prepare data
-		header := unittest.BlockHeaderWithParentFixture(genesis) // make sure the height is higher than genesis
-		executionReceipt := unittest.ExecutionReceiptFixture()
-		executionReceipt.ExecutionResult.BlockID = header.ID()
-		cdp := make([]*flow.ChunkDataPack, 0, len(executionReceipt.ExecutionResult.Chunks))
-		for _, chunk := range executionReceipt.ExecutionResult.Chunks {
-			cdp = append(cdp, unittest.ChunkDataPackFixture(chunk.ID()))
-		}
-		endState, err := executionReceipt.ExecutionResult.FinalStateCommitment()
-		require.NoError(t, err)
-		blockEvents := unittest.BlockEventsFixture(header, 3)
-		// se := unittest.ServiceEventsFixture(2)
-		se := unittest.BlockEventsFixture(header, 8)
-		tes := unittest.TransactionResultsFixture(4)
+			computationResult := testutil.ComputationResultFixture(t)
+			header := computationResult.Block.Header
 
-		err = headers.Store(header)
-		require.NoError(t, err)
+			err = headers.Store(header)
+			require.NoError(t, err)
 
-		// save execution results
-		err = es.SaveExecutionResults(
-			context.Background(),
-			header,
-			endState,
-			cdp,
-			executionReceipt,
-			[]flow.EventsList{blockEvents.Events},
-			se.Events,
-			tes,
-		)
+			// save execution results
+			err = es.SaveExecutionResults(context.Background(), computationResult)
+			require.NoError(t, err)
 
-		require.NoError(t, err)
+			batch := bstorage.NewBatch(db)
+			chunkBatch := pebbleimpl.ToDB(pdb).NewBatch()
 
-		// remove execution results
-		err = removeForBlockID(
-			headers,
-			commits,
-			txResults,
-			results,
-			chunkDataPacks,
-			myReceipts,
-			events,
-			serviceEvents,
-			header.ID(),
-		)
+			// remove execution results
+			err = removeForBlockID(
+				batch,
+				chunkBatch,
+				headers,
+				commits,
+				txResults,
+				results,
+				chunkDataPacks,
+				myReceipts,
+				events,
+				serviceEvents,
+				header.ID(),
+			)
 
-		require.NoError(t, err)
+			require.NoError(t, err)
 
-		// re execute result
-		err = es.SaveExecutionResults(
-			context.Background(),
-			header,
-			endState,
-			cdp,
-			executionReceipt,
-			[]flow.EventsList{blockEvents.Events},
-			se.Events,
-			tes,
-		)
+			// remove again, to make sure missing entires are handled properly
+			err = removeForBlockID(
+				batch,
+				chunkBatch,
+				headers,
+				commits,
+				txResults,
+				results,
+				chunkDataPacks,
+				myReceipts,
+				events,
+				serviceEvents,
+				header.ID(),
+			)
 
-		require.NoError(t, err)
+			require.NoError(t, err)
+			require.NoError(t, chunkBatch.Commit())
+			err2 := batch.Flush()
+
+			require.NoError(t, err2)
+
+			batch = bstorage.NewBatch(db)
+			chunkBatch = pebbleimpl.ToDB(pdb).NewBatch()
+
+			// remove again after flushing
+			err = removeForBlockID(
+				batch,
+				chunkBatch,
+				headers,
+				commits,
+				txResults,
+				results,
+				chunkDataPacks,
+				myReceipts,
+				events,
+				serviceEvents,
+				header.ID(),
+			)
+			require.NoError(t, err)
+
+			require.NoError(t, chunkBatch.Commit())
+			err2 = batch.Flush()
+
+			require.NoError(t, err2)
+
+			// re execute result
+			err = es.SaveExecutionResults(context.Background(), computationResult)
+			require.NoError(t, err)
+		})
 	})
 }
 
@@ -130,117 +156,125 @@ func TestReExecuteBlock(t *testing.T) {
 // save again with different result should work
 func TestReExecuteBlockWithDifferentResult(t *testing.T) {
 	unittest.RunWithBadgerDB(t, func(db *badger.DB) {
+		unittest.RunWithPebbleDB(t, func(pdb *pebble.DB) {
 
-		// bootstrap to init highest executed height
-		bootstrapper := bootstrap.NewBootstrapper(unittest.Logger())
-		genesis := unittest.BlockHeaderFixture()
-		err := bootstrapper.BootstrapExecutionDatabase(db, unittest.StateCommitmentFixture(), genesis)
-		require.NoError(t, err)
+			// bootstrap to init highest executed height
+			bootstrapper := bootstrap.NewBootstrapper(unittest.Logger())
+			genesis := unittest.BlockHeaderFixture()
+			rootSeal := unittest.Seal.Fixture()
+			unittest.Seal.WithBlock(genesis)(rootSeal)
+			err := bootstrapper.BootstrapExecutionDatabase(db, rootSeal)
+			require.NoError(t, err)
 
-		// create all modules
-		metrics := &metrics.NoopCollector{}
+			// create all modules
+			metrics := &metrics.NoopCollector{}
 
-		headers := bstorage.NewHeaders(metrics, db)
-		txResults := bstorage.NewTransactionResults(metrics, db, bstorage.DefaultCacheSize)
-		commits := bstorage.NewCommits(metrics, db)
-		chunkDataPacks := bstorage.NewChunkDataPacks(metrics, db, bstorage.NewCollections(db, bstorage.NewTransactions(metrics, db)), bstorage.DefaultCacheSize)
-		results := bstorage.NewExecutionResults(metrics, db)
-		receipts := bstorage.NewExecutionReceipts(metrics, db, results, bstorage.DefaultCacheSize)
-		myReceipts := bstorage.NewMyExecutionReceipts(metrics, db, receipts)
-		events := bstorage.NewEvents(metrics, db)
-		serviceEvents := bstorage.NewServiceEvents(metrics, db)
-		transactions := bstorage.NewTransactions(metrics, db)
-		collections := bstorage.NewCollections(db, transactions)
+			headers := bstorage.NewHeaders(metrics, db)
+			txResults := bstorage.NewTransactionResults(metrics, db, bstorage.DefaultCacheSize)
+			commits := bstorage.NewCommits(metrics, db)
+			chunkDataPacks := store.NewChunkDataPacks(metrics, pebbleimpl.ToDB(pdb), bstorage.NewCollections(db, bstorage.NewTransactions(metrics, db)), bstorage.DefaultCacheSize)
+			results := bstorage.NewExecutionResults(metrics, db)
+			receipts := bstorage.NewExecutionReceipts(metrics, db, results, bstorage.DefaultCacheSize)
+			myReceipts := bstorage.NewMyExecutionReceipts(metrics, db, receipts)
+			events := bstorage.NewEvents(metrics, db)
+			serviceEvents := bstorage.NewServiceEvents(metrics, db)
+			transactions := bstorage.NewTransactions(metrics, db)
+			collections := bstorage.NewCollections(db, transactions)
 
-		err = headers.Store(genesis)
-		require.NoError(t, err)
+			err = headers.Store(genesis)
+			require.NoError(t, err)
 
-		// create execution state module
-		es := state.NewExecutionState(
-			nil,
-			commits,
-			nil,
-			headers,
-			collections,
-			chunkDataPacks,
-			results,
-			myReceipts,
-			events,
-			serviceEvents,
-			txResults,
-			db,
-			trace.NewNoopTracer(),
-		)
-		require.NotNil(t, es)
+			// create execution state module
+			es := state.NewExecutionState(
+				nil,
+				commits,
+				nil,
+				headers,
+				collections,
+				chunkDataPacks,
+				results,
+				myReceipts,
+				events,
+				serviceEvents,
+				txResults,
+				db,
+				trace.NewNoopTracer(),
+				nil,
+				false,
+			)
+			require.NotNil(t, es)
 
-		// prepare data
-		header := unittest.BlockHeaderWithParentFixture(genesis) // make sure the height is higher than genesis
-		executionReceipt := unittest.ExecutionReceiptFixture()
-		executionReceipt.ExecutionResult.BlockID = header.ID()
-		cdp := make([]*flow.ChunkDataPack, 0, len(executionReceipt.ExecutionResult.Chunks))
-		for _, chunk := range executionReceipt.ExecutionResult.Chunks {
-			cdp = append(cdp, unittest.ChunkDataPackFixture(chunk.ID()))
-		}
-		endState, err := executionReceipt.ExecutionResult.FinalStateCommitment()
-		require.NoError(t, err)
-		blockEvents := unittest.BlockEventsFixture(header, 3)
-		// se := unittest.ServiceEventsFixture(2)
-		se := unittest.BlockEventsFixture(header, 8)
-		tes := unittest.TransactionResultsFixture(4)
+			executableBlock := unittest.ExecutableBlockFixtureWithParent(
+				nil,
+				genesis,
+				&unittest.GenesisStateCommitment)
+			header := executableBlock.Block.Header
 
-		err = headers.Store(header)
-		require.NoError(t, err)
+			err = headers.Store(header)
+			require.NoError(t, err)
 
-		// save execution results
-		err = es.SaveExecutionResults(
-			context.Background(),
-			header,
-			endState,
-			cdp,
-			executionReceipt,
-			[]flow.EventsList{blockEvents.Events},
-			se.Events,
-			tes,
-		)
+			computationResult := testutil.ComputationResultFixture(t)
+			computationResult.ExecutableBlock = executableBlock
+			computationResult.ExecutionReceipt.ExecutionResult.BlockID = header.ID()
 
-		require.NoError(t, err)
+			// save execution results
+			err = es.SaveExecutionResults(context.Background(), computationResult)
+			require.NoError(t, err)
 
-		// remove execution results
-		err = removeForBlockID(
-			headers,
-			commits,
-			txResults,
-			results,
-			chunkDataPacks,
-			myReceipts,
-			events,
-			serviceEvents,
-			header.ID(),
-		)
+			batch := bstorage.NewBatch(db)
+			chunkBatch := pebbleimpl.ToDB(pdb).NewBatch()
 
-		require.NoError(t, err)
+			// remove execution results
+			err = removeForBlockID(
+				batch,
+				chunkBatch,
+				headers,
+				commits,
+				txResults,
+				results,
+				chunkDataPacks,
+				myReceipts,
+				events,
+				serviceEvents,
+				header.ID(),
+			)
 
-		executionReceipt2 := unittest.ExecutionReceiptFixture()
-		executionReceipt2.ExecutionResult.BlockID = header.ID()
-		cdp2 := make([]*flow.ChunkDataPack, 0, len(executionReceipt2.ExecutionResult.Chunks))
-		for _, chunk := range executionReceipt.ExecutionResult.Chunks {
-			cdp2 = append(cdp2, unittest.ChunkDataPackFixture(chunk.ID()))
-		}
-		endState2, err := executionReceipt2.ExecutionResult.FinalStateCommitment()
-		require.NoError(t, err)
+			require.NoError(t, err)
+			require.NoError(t, chunkBatch.Commit())
+			err2 := batch.Flush()
+			require.NoError(t, err2)
 
-		// re execute result
-		err = es.SaveExecutionResults(
-			context.Background(),
-			header,
-			endState2,
-			cdp2,
-			executionReceipt2,
-			[]flow.EventsList{blockEvents.Events},
-			se.Events,
-			tes,
-		)
+			batch = bstorage.NewBatch(db)
+			chunkBatch = pebbleimpl.ToDB(pdb).NewBatch()
 
-		require.NoError(t, err)
+			// remove again to test for duplicates handling
+			err = removeForBlockID(
+				batch,
+				chunkBatch,
+				headers,
+				commits,
+				txResults,
+				results,
+				chunkDataPacks,
+				myReceipts,
+				events,
+				serviceEvents,
+				header.ID(),
+			)
+
+			require.NoError(t, err)
+			require.NoError(t, chunkBatch.Commit())
+
+			err2 = batch.Flush()
+			require.NoError(t, err2)
+
+			computationResult2 := testutil.ComputationResultFixture(t)
+			computationResult2.ExecutableBlock = executableBlock
+			computationResult2.ExecutionResult.BlockID = header.ID()
+
+			// re execute result
+			err = es.SaveExecutionResults(context.Background(), computationResult2)
+			require.NoError(t, err)
+		})
 	})
 }

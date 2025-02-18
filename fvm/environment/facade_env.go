@@ -3,11 +3,16 @@ package environment
 import (
 	"context"
 
-	"github.com/onflow/cadence/runtime/common"
-	"github.com/onflow/cadence/runtime/interpreter"
+	"github.com/onflow/cadence/ast"
+	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/interpreter"
+	"github.com/onflow/cadence/sema"
 
-	"github.com/onflow/flow-go/fvm/programs"
-	"github.com/onflow/flow-go/fvm/state"
+	"github.com/onflow/flow-go/fvm/storage"
+	"github.com/onflow/flow-go/fvm/storage/snapshot"
+	"github.com/onflow/flow-go/fvm/storage/state"
+	"github.com/onflow/flow-go/fvm/systemcontracts"
+	"github.com/onflow/flow-go/fvm/tracing"
 )
 
 var _ Environment = &facadeEnvironment{}
@@ -16,29 +21,31 @@ var _ Environment = &facadeEnvironment{}
 type facadeEnvironment struct {
 	*Runtime
 
-	*Tracer
+	tracing.TracerSpan
 	Meter
 
 	*ProgramLogger
 	EventEmitter
 
-	*UnsafeRandomGenerator
-	*CryptoLibrary
+	RandomGenerator
+	CryptoLibrary
+	RandomSourceHistoryProvider
 
-	*BlockInfo
-	*AccountInfo
+	BlockInfo
+	AccountInfo
 	TransactionInfo
 
-	*ValueStore
+	ValueStore
 
 	*SystemContracts
+	MinimumCadenceRequiredVersion
 
-	*UUIDGenerator
+	UUIDGenerator
+	AccountLocalIDGenerator
 
 	AccountCreator
-	AccountFreezer
 
-	*AccountKeyReader
+	AccountKeyReader
 	AccountKeyUpdater
 
 	*ContractReader
@@ -46,39 +53,38 @@ type facadeEnvironment struct {
 	*Programs
 
 	accounts Accounts
-	txnState *state.TransactionState
+	txnState storage.TransactionPreparer
 }
 
 func newFacadeEnvironment(
+	tracer tracing.TracerSpan,
 	params EnvironmentParams,
-	txnState *state.TransactionState,
-	programs TransactionPrograms,
+	txnState storage.TransactionPreparer,
 	meter Meter,
 ) *facadeEnvironment {
-	tracer := NewTracer(params.TracerParams)
 	accounts := NewAccounts(txnState)
 	logger := NewProgramLogger(tracer, params.ProgramLoggerParams)
 	runtime := NewRuntime(params.RuntimeParams)
+	chain := params.Chain
 	systemContracts := NewSystemContracts(
-		params.Chain,
+		chain,
 		tracer,
 		logger,
 		runtime)
 
+	sc := systemcontracts.SystemContractsForChain(chain.ChainID())
+
 	env := &facadeEnvironment{
 		Runtime: runtime,
 
-		Tracer: tracer,
-		Meter:  meter,
+		TracerSpan: tracer,
+		Meter:      meter,
 
 		ProgramLogger: logger,
 		EventEmitter:  NoEventEmitter{},
 
-		UnsafeRandomGenerator: NewUnsafeRandomGenerator(
-			tracer,
-			params.BlockHeader,
-		),
-		CryptoLibrary: NewCryptoLibrary(tracer, meter),
+		CryptoLibrary:               NewCryptoLibrary(tracer, meter),
+		RandomSourceHistoryProvider: NewForbiddenRandomSourceHistoryProvider(),
 
 		BlockInfo: NewBlockInfo(
 			tracer,
@@ -102,14 +108,24 @@ func newFacadeEnvironment(
 		),
 
 		SystemContracts: systemContracts,
+		MinimumCadenceRequiredVersion: NewMinimumCadenceRequiredVersion(
+			params.ExecutionVersionProvider,
+		),
 
 		UUIDGenerator: NewUUIDGenerator(
 			tracer,
+			params.Logger,
 			meter,
-			txnState),
+			txnState,
+			params.BlockHeader,
+			params.TxIndex),
+		AccountLocalIDGenerator: NewAccountLocalIDGenerator(
+			tracer,
+			meter,
+			accounts,
+		),
 
 		AccountCreator: NoAccountCreator{},
-		AccountFreezer: NoAccountFreezer{},
 
 		AccountKeyReader: NewAccountKeyReader(
 			tracer,
@@ -122,14 +138,15 @@ func newFacadeEnvironment(
 			tracer,
 			meter,
 			accounts,
+			common.Address(sc.Crypto.Address),
 		),
 		ContractUpdater: NoContractUpdater{},
 		Programs: NewPrograms(
 			tracer,
 			meter,
+			params.MetricsReporter,
 			txnState,
-			accounts,
-			programs),
+			accounts),
 
 		accounts: accounts,
 		txnState: txnState,
@@ -140,42 +157,60 @@ func newFacadeEnvironment(
 	return env
 }
 
-func newScriptFacadeEnvironment(
-	ctx context.Context,
+// This is mainly used by command line tools, the emulator, and cadence tools
+// testing.
+func NewScriptEnvironmentFromStorageSnapshot(
 	params EnvironmentParams,
-	txnState *state.TransactionState,
-	programs TransactionPrograms,
+	storageSnapshot snapshot.StorageSnapshot,
+) *facadeEnvironment {
+	blockDatabase := storage.NewBlockDatabase(storageSnapshot, 0, nil)
+
+	return NewScriptEnv(
+		context.Background(),
+		tracing.NewTracerSpan(),
+		params,
+		blockDatabase.NewSnapshotReadTransaction(state.DefaultParameters()))
+}
+
+func NewScriptEnv(
+	ctx context.Context,
+	tracer tracing.TracerSpan,
+	params EnvironmentParams,
+	txnState storage.TransactionPreparer,
 ) *facadeEnvironment {
 	env := newFacadeEnvironment(
+		tracer,
 		params,
 		txnState,
-		programs,
 		NewCancellableMeter(ctx, txnState))
-
+	env.RandomGenerator = NewRandomGenerator(
+		tracer,
+		params.EntropyProvider,
+		params.ScriptInfoParams.ID[:],
+	)
 	env.addParseRestrictedChecks()
-
 	return env
 }
 
-func newTransactionFacadeEnvironment(
+func NewTransactionEnvironment(
+	tracer tracing.TracerSpan,
 	params EnvironmentParams,
-	txnState *state.TransactionState,
-	programs TransactionPrograms,
+	txnState storage.TransactionPreparer,
 ) *facadeEnvironment {
 	env := newFacadeEnvironment(
+		tracer,
 		params,
 		txnState,
-		programs,
 		NewMeter(txnState),
 	)
 
 	env.TransactionInfo = NewTransactionInfo(
 		params.TransactionInfoParams,
-		env.Tracer,
+		tracer,
 		params.Chain.ServiceAddress(),
 	)
 	env.EventEmitter = NewEventEmitter(
-		env.Tracer,
+		tracer,
 		env.Meter,
 		params.Chain,
 		params.TransactionInfoParams,
@@ -186,19 +221,15 @@ func newTransactionFacadeEnvironment(
 		params.Chain,
 		env.accounts,
 		params.ServiceAccountEnabled,
-		env.Tracer,
+		tracer,
 		env.Meter,
 		params.MetricsReporter,
 		env.SystemContracts)
-	env.AccountFreezer = NewAccountFreezer(
-		params.Chain.ServiceAddress(),
-		env.accounts,
-		env.TransactionInfo)
 	env.ContractUpdater = NewContractUpdater(
-		env.Tracer,
+		tracer,
 		env.Meter,
 		env.accounts,
-		env.TransactionInfo,
+		params.TransactionInfoParams.TxBody.Authorizers,
 		params.Chain,
 		params.ContractUpdaterParams,
 		env.ProgramLogger,
@@ -206,11 +237,24 @@ func newTransactionFacadeEnvironment(
 		env.Runtime)
 
 	env.AccountKeyUpdater = NewAccountKeyUpdater(
-		env.Tracer,
+		tracer,
 		env.Meter,
 		env.accounts,
 		txnState,
 		env)
+
+	env.RandomGenerator = NewRandomGenerator(
+		tracer,
+		params.EntropyProvider,
+		params.TxId[:],
+	)
+
+	env.RandomSourceHistoryProvider = NewRandomSourceHistoryProvider(
+		tracer,
+		env.Meter,
+		params.EntropyProvider,
+		params.TransactionInfoParams.RandomSourceHistoryCallAllowed,
+	)
 
 	env.addParseRestrictedChecks()
 
@@ -218,35 +262,128 @@ func newTransactionFacadeEnvironment(
 }
 
 func (env *facadeEnvironment) addParseRestrictedChecks() {
+	// NOTE: Cadence can access Programs, ContractReader, Meter and
+	// ProgramLogger while it is parsing programs; all other access are
+	// unexpected and are potentially program cache invalidation bugs.
+	//
+	// Also note that Tracer and SystemContracts are unguarded since these are
+	// not accessible by Cadence.
+
 	env.AccountCreator = NewParseRestrictedAccountCreator(
 		env.txnState,
 		env.AccountCreator)
-
-	// TODO(patrick): check other API
+	env.AccountInfo = NewParseRestrictedAccountInfo(
+		env.txnState,
+		env.AccountInfo)
+	env.AccountKeyReader = NewParseRestrictedAccountKeyReader(
+		env.txnState,
+		env.AccountKeyReader)
+	env.AccountKeyUpdater = NewParseRestrictedAccountKeyUpdater(
+		env.txnState,
+		env.AccountKeyUpdater)
+	env.BlockInfo = NewParseRestrictedBlockInfo(
+		env.txnState,
+		env.BlockInfo)
+	env.ContractUpdater = NewParseRestrictedContractUpdater(
+		env.txnState,
+		env.ContractUpdater)
+	env.CryptoLibrary = NewParseRestrictedCryptoLibrary(
+		env.txnState,
+		env.CryptoLibrary)
+	env.EventEmitter = NewParseRestrictedEventEmitter(
+		env.txnState,
+		env.EventEmitter)
+	env.TransactionInfo = NewParseRestrictedTransactionInfo(
+		env.txnState,
+		env.TransactionInfo)
+	env.RandomGenerator = NewParseRestrictedRandomGenerator(
+		env.txnState,
+		env.RandomGenerator)
+	env.RandomSourceHistoryProvider = NewParseRestrictedRandomSourceHistoryProvider(
+		env.txnState,
+		env.RandomSourceHistoryProvider)
+	env.UUIDGenerator = NewParseRestrictedUUIDGenerator(
+		env.txnState,
+		env.UUIDGenerator)
+	env.AccountLocalIDGenerator = NewParseRestrictedAccountLocalIDGenerator(
+		env.txnState,
+		env.AccountLocalIDGenerator)
+	env.ValueStore = NewParseRestrictedValueStore(
+		env.txnState,
+		env.ValueStore)
 }
 
 func (env *facadeEnvironment) FlushPendingUpdates() (
-	programs.ModifiedSetsInvalidator,
+	ContractUpdates,
 	error,
 ) {
-	keys, err := env.ContractUpdater.Commit()
-	return programs.ModifiedSetsInvalidator{
-		ContractUpdateKeys: keys,
-		FrozenAccounts:     env.FrozenAccounts(),
-	}, err
+	return env.ContractUpdater.Commit()
 }
 
 func (env *facadeEnvironment) Reset() {
 	env.ContractUpdater.Reset()
 	env.EventEmitter.Reset()
-	env.AccountFreezer.Reset()
+	env.Programs.Reset()
 }
 
-// Miscellaneous cadence runtime.Interface API.
-func (facadeEnvironment) ResourceOwnerChanged(
+// Miscellaneous Cadence runtime.Interface API
+
+func (*facadeEnvironment) ResourceOwnerChanged(
 	*interpreter.Interpreter,
 	*interpreter.CompositeValue,
 	common.Address,
 	common.Address,
 ) {
+	// NO-OP
+}
+
+func (*facadeEnvironment) SetInterpreterSharedState(_ *interpreter.SharedState) {
+	// NO-OP
+}
+
+func (*facadeEnvironment) GetInterpreterSharedState() *interpreter.SharedState {
+	// NO-OP
+	return nil
+}
+
+func (env *facadeEnvironment) RecoverProgram(program *ast.Program, location common.Location) ([]byte, error) {
+	return RecoverProgram(
+		env.chain.ChainID(),
+		program,
+		location,
+	)
+}
+
+func (env *facadeEnvironment) ValidateAccountCapabilitiesGet(
+	_ *interpreter.Interpreter,
+	_ interpreter.LocationRange,
+	_ interpreter.AddressValue,
+	_ interpreter.PathValue,
+	wantedBorrowType *sema.ReferenceType,
+	_ *sema.ReferenceType,
+) (bool, error) {
+	_, hasEntitlements := wantedBorrowType.Authorization.(sema.EntitlementSetAccess)
+	if hasEntitlements {
+		// TODO: maybe abort
+		//return false, interpreter.GetCapabilityError{
+		//	LocationRange: locationRange,
+		//}
+		return false, nil
+	}
+	return true, nil
+}
+
+func (env *facadeEnvironment) ValidateAccountCapabilitiesPublish(
+	_ *interpreter.Interpreter,
+	_ interpreter.LocationRange,
+	_ interpreter.AddressValue,
+	_ interpreter.PathValue,
+	capabilityBorrowType *interpreter.ReferenceStaticType,
+) (bool, error) {
+	_, isEntitledCapability := capabilityBorrowType.Authorization.(interpreter.EntitlementSetAuthorization)
+	if isEntitledCapability {
+		// TODO: maybe abort
+		return false, nil
+	}
+	return true, nil
 }

@@ -1,45 +1,5 @@
-# Collection Stream
-/cmd/collection/** @jordanschalm
-/engine/collection/** @jordanschalm
-/protobuf/services/collection/** @jordanschalm
+# Protocol owners are not generally differentiated by sub-area for simplicity
+/** @onflow/flow-core-protocol
 
-# Consensus Stream
-/cmd/consensus/** @AlexHentschel @zhangchiqing
-/engine/consensus/** @AlexHentschel @zhangchiqing
-
-# Execution Stream
-/cmd/execution/** @m4ksio @ramtinms
-/engine/execution/** @m4ksio @ramtinms
-
-# Access Stream
-/cmd/access/** @vishalchangrani
-/engine/access/** @vishalchangrani
-
-# Verification Stream
-/cmd/verification/** @ramtinms @yhassanzadeh13
-/engine/verification/** @ramtinms @yhassanzadeh13
-/module/chunking/** @ramtinms
-/integration/tests/verification @ramtinms @yhassanzadeh13
-
-# Ledger Stream 
-/ledger/** @ramtinms @m4ksio @AlexHentschel
-
-# FVM Stream 
-/fvm/**  @ramtinms @janezpodhostnik @pattyshack
-
-# Networking Stream
-/network/** @yhassanzadeh13 @vishalchangrani
-
-# Cryptography Stream
-/crypto/** @tarakby
-
-# Bootstrap and transit scripts
-/cmd/bootstrap/** @vishalchangrani
-
-# Performance Stream
-/integration/benchmark/** @SaveTheRbtz @Kay-Zee @AndrewM-SDET
-/integration/localnet/** @SaveTheRbtz @Kay-Zee @zhangchiqing @AndrewM-SDET
-/module/profiler/** @SaveTheRbtz @Kay-Zee @pattyshack
-/module/trace/** @SaveTheRbtz @Kay-Zee @pattyshack
-/module/tracer.go @SaveTheRbtz @Kay-Zee @pattyshack
-/utils/binstat/** @SaveTheRbtz @Kay-Zee @pattyshack
+# FVM specific
+/fvm/** @janezpodhostnik @zhangchiqing 

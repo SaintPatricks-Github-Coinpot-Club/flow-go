@@ -1,5 +1,3 @@
-// (c) 2021 Dapper Labs - ALL RIGHTS RESERVED
-
 package sealing
 
 import (
@@ -9,17 +7,18 @@ import (
 	"time"
 
 	"github.com/gammazero/workerpool"
+	"github.com/onflow/crypto/hash"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	otelTrace "go.opentelemetry.io/otel/trace"
+	"go.uber.org/atomic"
 
-	"github.com/onflow/flow-go/crypto/hash"
 	"github.com/onflow/flow-go/engine"
 	"github.com/onflow/flow-go/engine/consensus"
 	"github.com/onflow/flow-go/engine/consensus/approvals"
-	"github.com/onflow/flow-go/engine/consensus/sealing/counters"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module"
+	"github.com/onflow/flow-go/module/counters"
 	"github.com/onflow/flow-go/module/mempool"
 	"github.com/onflow/flow-go/module/trace"
 	"github.com/onflow/flow-go/network"
@@ -36,13 +35,12 @@ import (
 //   - pre-validating approvals (if they are outdated or non-verifiable)
 //   - pruning already processed collectorTree
 type Core struct {
-	unit                       *engine.Unit
 	workerPool                 *workerpool.WorkerPool             // worker pool used by collectors
 	log                        zerolog.Logger                     // used to log relevant actions with context
 	collectorTree              *approvals.AssignmentCollectorTree // levelled forest for assignment collectors
 	approvalsCache             *approvals.LruCache                // in-memory cache of approvals that weren't verified
-	counterLastSealedHeight    counters.StrictMonotonousCounter   // monotonous counter for last sealed block height
-	counterLastFinalizedHeight counters.StrictMonotonousCounter   // monotonous counter for last finalized block height
+	counterLastSealedHeight    counters.StrictMonotonicCounter    // monotonic counter for last sealed block height
+	counterLastFinalizedHeight counters.StrictMonotonicCounter    // monotonic counter for last finalized block height
 	headers                    storage.Headers                    // used to access block headers in storage
 	state                      protocol.State                     // used to access protocol state
 	seals                      storage.Seals                      // used to get last sealed block
@@ -52,6 +50,7 @@ type Core struct {
 	sealingTracker             consensus.SealingTracker           // logic-aware component for tracking sealing progress.
 	tracer                     module.Tracer                      // used to trace execution
 	sealingConfigsGetter       module.SealingConfigsGetter        // used to access configs for sealing conditions
+	reporter                   *gatedSealingObservationReporter   // used to avoid excess resource usage by sealing observation completions
 }
 
 func NewCore(
@@ -60,7 +59,6 @@ func NewCore(
 	tracer module.Tracer,
 	conMetrics module.ConsensusMetrics,
 	sealingTracker consensus.SealingTracker,
-	unit *engine.Unit,
 	headers storage.Headers,
 	state protocol.State,
 	sealsDB storage.Seals,
@@ -81,16 +79,16 @@ func NewCore(
 		tracer:                     tracer,
 		metrics:                    conMetrics,
 		sealingTracker:             sealingTracker,
-		unit:                       unit,
 		approvalsCache:             approvals.NewApprovalsLRUCache(1000),
-		counterLastSealedHeight:    counters.NewMonotonousCounter(lastSealed.Height),
-		counterLastFinalizedHeight: counters.NewMonotonousCounter(lastSealed.Height),
+		counterLastSealedHeight:    counters.NewMonotonicCounter(lastSealed.Height),
+		counterLastFinalizedHeight: counters.NewMonotonicCounter(lastSealed.Height),
 		headers:                    headers,
 		state:                      state,
 		seals:                      sealsDB,
 		sealsMempool:               sealsMempool,
 		requestTracker:             approvals.NewRequestTracker(headers, 10, 30),
 		sealingConfigsGetter:       sealingConfigsGetter,
+		reporter:                   newGatedSealingObservationReporter(),
 	}
 
 	factoryMethod := func(result *flow.ExecutionResult) (approvals.AssignmentCollector, error) {
@@ -137,10 +135,7 @@ func (c *Core) RepopulateAssignmentCollectorTree(payloads storage.Payloads) erro
 
 	// Get the root block of our local state - we allow references to unknown
 	// blocks below the root height
-	rootHeader, err := c.state.Params().Root()
-	if err != nil {
-		return fmt.Errorf("could not retrieve root header: %w", err)
-	}
+	rootHeader := c.state.Params().FinalizedRoot()
 
 	// Determine the list of unknown blocks referenced within the sealing segment
 	// if we are initializing with a latest sealed block below the root height
@@ -197,7 +192,7 @@ func (c *Core) RepopulateAssignmentCollectorTree(payloads storage.Payloads) erro
 
 	// at this point we have processed all results in range (lastSealedBlock, lastFinalizedBlock].
 	// Now, we add all known results for any valid block that descends from the latest finalized block:
-	validPending, err := finalizedSnapshot.ValidDescendants()
+	validPending, err := finalizedSnapshot.Descendants()
 	if err != nil {
 		return fmt.Errorf("could not retrieve valid pending blocks from finalized snapshot: %w", err)
 	}
@@ -257,11 +252,11 @@ func (c *Core) processIncorporatedResult(incRes *flow.IncorporatedResult) error 
 	// For incorporating blocks at heights that are already finalized, we check that the incorporating block
 	// is on the finalized fork. Otherwise, the incorporating block is orphaned, and we can drop the result.
 	if incorporatedAtHeight <= c.counterLastFinalizedHeight.Value() {
-		finalized, err := c.headers.ByHeight(incorporatedAtHeight)
+		finalizedID, err := c.headers.BlockIDByHeight(incorporatedAtHeight)
 		if err != nil {
 			return fmt.Errorf("could not retrieve finalized block at height %d: %w", incorporatedAtHeight, err)
 		}
-		if finalized.ID() != incRes.IncorporatedBlockID {
+		if finalizedID != incRes.IncorporatedBlockID {
 			// it means that we got incorporated incRes for a block which doesn't extend our chain
 			// and should be discarded from future processing
 			return engine.NewOutdatedInputErrorf("won't process incorporated incRes from orphan block %s", incRes.IncorporatedBlockID)
@@ -303,7 +298,7 @@ func (c *Core) processIncorporatedResult(incRes *flow.IncorporatedResult) error 
 // * nil - successfully processed incorporated result
 func (c *Core) ProcessIncorporatedResult(result *flow.IncorporatedResult) error {
 
-	span, _, _ := c.tracer.StartBlockSpan(context.Background(), result.Result.BlockID, trace.CONSealingProcessIncorporatedResult)
+	span, _ := c.tracer.StartBlockSpan(context.Background(), result.Result.BlockID, trace.CONSealingProcessIncorporatedResult)
 	defer span.End()
 
 	err := c.processIncorporatedResult(result)
@@ -352,13 +347,11 @@ func (c *Core) ProcessApproval(approval *flow.ResultApproval) error {
 		Str("verifier_id", approval.Body.ApproverID.String()).
 		Msg("processing result approval")
 
-	span, _, isSampled := c.tracer.StartBlockSpan(context.Background(), approval.Body.BlockID, trace.CONSealingProcessApproval)
-	if isSampled {
-		span.SetAttributes(
-			attribute.String("approverId", approval.Body.ApproverID.String()),
-			attribute.Int64("chunkIndex", int64(approval.Body.ChunkIndex)),
-		)
-	}
+	span, _ := c.tracer.StartBlockSpan(context.Background(), approval.Body.BlockID, trace.CONSealingProcessApproval)
+	span.SetAttributes(
+		attribute.String("approverId", approval.Body.ApproverID.String()),
+		attribute.Int64("chunkIndex", int64(approval.Body.ChunkIndex)),
+	)
 	defer span.End()
 
 	startTime := time.Now()
@@ -505,7 +498,7 @@ func (c *Core) processPendingApprovals(collector approvals.AssignmentCollectorSt
 // * nil - successfully processed finalized block
 func (c *Core) ProcessFinalizedBlock(finalizedBlockID flow.Identifier) error {
 
-	processFinalizedBlockSpan, _, _ := c.tracer.StartBlockSpan(context.Background(), finalizedBlockID, trace.CONSealingProcessFinalizedBlock)
+	processFinalizedBlockSpan, _ := c.tracer.StartBlockSpan(context.Background(), finalizedBlockID, trace.CONSealingProcessFinalizedBlock)
 	defer processFinalizedBlockSpan.End()
 
 	// STEP 0: Collect auxiliary information
@@ -568,7 +561,9 @@ func (c *Core) ProcessFinalizedBlock(finalizedBlockID flow.Identifier) error {
 	//   observes the latest state of `sealingObservation`.
 	// * The `sealingObservation` lives in the scope of this function. Hence, when this goroutine exits
 	//   this function, `sealingObservation` lives solely in the scope of the newly-created goroutine.
-	c.unit.Launch(sealingObservation.Complete)
+	// We do this call asynchronously because we are in the hot path, and it is not required to progress,
+	// and the call may involve database transactions that would unnecessarily delay sealing.
+	c.reporter.reportAsync(sealingObservation)
 
 	return nil
 }
@@ -587,12 +582,12 @@ func (c *Core) prune(parentSpan otelTrace.Span, finalized, lastSealed *flow.Head
 	}
 
 	err = c.requestTracker.PruneUpToHeight(lastSealed.Height)
-	if err != nil && !mempool.IsDecreasingPruningHeightError(err) {
+	if err != nil && !mempool.IsBelowPrunedThresholdError(err) {
 		return fmt.Errorf("could not request tracker at block up to height %d: %w", lastSealed.Height, err)
 	}
 
 	err = c.sealsMempool.PruneUpToHeight(lastSealed.Height) // prune candidate seals mempool
-	if err != nil && !mempool.IsDecreasingPruningHeightError(err) {
+	if err != nil && !mempool.IsBelowPrunedThresholdError(err) {
 		return fmt.Errorf("could not prune seals mempool at block up to height %d: %w", lastSealed.Height, err)
 	}
 
@@ -661,7 +656,7 @@ func (c *Core) getOutdatedBlockIDsFromRootSealingSegment(rootHeader *flow.Header
 	}
 
 	knownBlockIDs := make(map[flow.Identifier]struct{}) // track block IDs in the sealing segment
-	var outdatedBlockIDs flow.IdentifierList
+	outdatedBlockIDs := make(flow.IdentifierList, 0)
 	for _, block := range rootSealingSegment.Blocks {
 		knownBlockIDs[block.ID()] = struct{}{}
 		for _, result := range block.Payload.Results {
@@ -672,4 +667,26 @@ func (c *Core) getOutdatedBlockIDsFromRootSealingSegment(rootHeader *flow.Header
 		}
 	}
 	return outdatedBlockIDs.Lookup(), nil
+}
+
+// gatedSealingObservationReporter is a utility for gating asynchronous completion of sealing observations.
+type gatedSealingObservationReporter struct {
+	reporting *atomic.Bool // true when a sealing observation is actively being asynchronously completed
+}
+
+func newGatedSealingObservationReporter() *gatedSealingObservationReporter {
+	return &gatedSealingObservationReporter{
+		reporting: atomic.NewBool(false),
+	}
+}
+
+// reportAsync only allows one in-flight observation completion at a time.
+// Any extra observations are dropped.
+func (reporter *gatedSealingObservationReporter) reportAsync(observation consensus.SealingObservation) {
+	if reporter.reporting.CompareAndSwap(false, true) {
+		go func() {
+			observation.Complete()
+			reporter.reporting.Store(false)
+		}()
+	}
 }

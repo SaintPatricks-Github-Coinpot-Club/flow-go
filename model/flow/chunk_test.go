@@ -3,9 +3,11 @@ package flow_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/utils/rand"
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
@@ -60,7 +62,7 @@ func TestDistinctChunkIDs_FullChunks(t *testing.T) {
 	require.NotEqual(t, blockIdA, blockIdB)
 
 	// generates a chunk associated with blockA
-	chunkA := unittest.ChunkFixture(blockIdA, 42)
+	chunkA := unittest.ChunkFixture(blockIdA, 42, unittest.StateCommitmentFixture())
 
 	// generates a deep copy of chunkA in chunkB
 	chunkB := *chunkA
@@ -78,7 +80,7 @@ func TestDistinctChunkIDs_FullChunks(t *testing.T) {
 
 // TestChunkList_Indices evaluates the Indices method of ChunkList on lists of different sizes.
 func TestChunkList_Indices(t *testing.T) {
-	cl := unittest.ChunkListFixture(5, unittest.IdentifierFixture())
+	cl := unittest.ChunkListFixture(5, unittest.IdentifierFixture(), unittest.StateCommitmentFixture())
 	t.Run("empty chunk subset indices", func(t *testing.T) {
 		// subset of chunk list that is empty should return an empty list
 		subset := flow.ChunkList{}
@@ -103,4 +105,56 @@ func TestChunkList_Indices(t *testing.T) {
 		require.Len(t, indices, 3)
 		require.Contains(t, indices, uint64(0), uint64(2), uint64(4))
 	})
+}
+
+func TestChunkIndexIsSet(t *testing.T) {
+
+	i, err := rand.Uint()
+	require.NoError(t, err)
+	chunk := flow.NewChunk(
+		unittest.IdentifierFixture(),
+		int(i),
+		unittest.StateCommitmentFixture(),
+		21,
+		unittest.IdentifierFixture(),
+		unittest.StateCommitmentFixture(),
+		17995,
+	)
+
+	assert.Equal(t, i, uint(chunk.Index))
+	assert.Equal(t, i, uint(chunk.CollectionIndex))
+}
+
+func TestChunkNumberOfTxsIsSet(t *testing.T) {
+
+	i, err := rand.Uint32()
+	require.NoError(t, err)
+	chunk := flow.NewChunk(
+		unittest.IdentifierFixture(),
+		3,
+		unittest.StateCommitmentFixture(),
+		int(i),
+		unittest.IdentifierFixture(),
+		unittest.StateCommitmentFixture(),
+		17995,
+	)
+
+	assert.Equal(t, i, uint32(chunk.NumberOfTransactions))
+}
+
+func TestChunkTotalComputationUsedIsSet(t *testing.T) {
+
+	i, err := rand.Uint64()
+	require.NoError(t, err)
+	chunk := flow.NewChunk(
+		unittest.IdentifierFixture(),
+		3,
+		unittest.StateCommitmentFixture(),
+		21,
+		unittest.IdentifierFixture(),
+		unittest.StateCommitmentFixture(),
+		i,
+	)
+
+	assert.Equal(t, i, chunk.TotalComputationUsed)
 }

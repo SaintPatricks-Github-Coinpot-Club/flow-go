@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/onflow/flow-go/cmd"
 	insecmd "github.com/onflow/flow-go/insecure/cmd"
 	"github.com/onflow/flow-go/model/flow"
@@ -11,15 +13,17 @@ func main() {
 	corruptedExecutionBuilder := cmd.NewExecutionNodeBuilder(corruptedBuilder.FlowNodeBuilder)
 	corruptedExecutionBuilder.LoadFlags()
 
+	corruptedBuilder.LoadCorruptFlags()
+
 	if err := corruptedBuilder.Initialize(); err != nil {
-		corruptedExecutionBuilder.FlowNodeBuilder.Logger.Fatal().Err(err).Send()
+		corruptedExecutionBuilder.Logger.Fatal().Err(err).Send()
 	}
 
 	corruptedExecutionBuilder.LoadComponentsAndModules()
 
 	node, err := corruptedExecutionBuilder.FlowNodeBuilder.Build()
 	if err != nil {
-		corruptedExecutionBuilder.FlowNodeBuilder.Logger.Fatal().Err(err).Send()
+		corruptedExecutionBuilder.Logger.Fatal().Err(err).Send()
 	}
-	node.Run()
+	node.Run(context.Background())
 }

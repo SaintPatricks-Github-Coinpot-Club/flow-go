@@ -4,12 +4,14 @@ import (
 	"fmt"
 
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/onflow/flow-go/model/chunks"
 	"github.com/onflow/flow-go/model/flow"
 	mempool "github.com/onflow/flow-go/module/mempool/mock"
 	module "github.com/onflow/flow-go/module/mock"
+	"github.com/onflow/flow-go/state"
 	realproto "github.com/onflow/flow-go/state/protocol"
 	protocol "github.com/onflow/flow-go/state/protocol/mock"
 	storerr "github.com/onflow/flow-go/storage"
@@ -256,6 +258,13 @@ func (bc *BaseChainSuite) SetupChain() {
 			return nil
 		},
 	)
+	bc.HeadersDB.On("Exists", mock.Anything).Return(
+		func(blockID flow.Identifier) bool {
+			_, found := bc.Blocks[blockID]
+			return found
+		},
+		func(blockID flow.Identifier) error { return nil },
+	)
 	bc.HeadersDB.On("ByHeight", mock.Anything).Return(
 		func(blockHeight uint64) *flow.Header {
 			for _, b := range bc.Blocks {
@@ -392,13 +401,13 @@ func (bc *BaseChainSuite) SetupChain() {
 func StateSnapshotForUnknownBlock() *protocol.Snapshot {
 	snapshot := &protocol.Snapshot{}
 	snapshot.On("Identity", mock.Anything).Return(
-		nil, storerr.ErrNotFound,
+		nil, state.ErrUnknownSnapshotReference,
 	)
 	snapshot.On("Identities", mock.Anything).Return(
-		nil, storerr.ErrNotFound,
+		nil, state.ErrUnknownSnapshotReference,
 	)
 	snapshot.On("Head", mock.Anything).Return(
-		nil, storerr.ErrNotFound,
+		nil, state.ErrUnknownSnapshotReference,
 	)
 	return snapshot
 }
@@ -418,7 +427,7 @@ func StateSnapshotForKnownBlock(block *flow.Header, identities map[flow.Identifi
 		},
 	)
 	snapshot.On("Identities", mock.Anything).Return(
-		func(selector flow.IdentityFilter) flow.IdentityList {
+		func(selector flow.IdentityFilter[flow.Identity]) flow.IdentityList {
 			var idts flow.IdentityList
 			for _, i := range identities {
 				if selector(i) {
@@ -427,7 +436,7 @@ func StateSnapshotForKnownBlock(block *flow.Header, identities map[flow.Identifi
 			}
 			return idts
 		},
-		func(selector flow.IdentityFilter) error {
+		func(selector flow.IdentityFilter[flow.Identity]) error {
 			return nil
 		},
 	)
@@ -473,7 +482,7 @@ type subgraphFixture struct {
 	Approvals          map[uint64]map[flow.Identifier]*flow.ResultApproval // chunkIndex -> Verifier Node ID -> Approval
 }
 
-// Generates a valid subgraph:
+// ValidSubgraphFixture generates a valid subgraph:
 // let
 //   - R1 be a result which pertains to blockA
 //   - R2 be R1's previous result,
@@ -500,12 +509,13 @@ func (bc *BaseChainSuite) ValidSubgraphFixture() subgraphFixture {
 	incorporatedResult := IncorporatedResult.Fixture(IncorporatedResult.WithResult(result))
 
 	// assign each chunk to 50% of validation Nodes and generate respective approvals
-	assignment := chunks.NewAssignment()
+	assignmentBuilder := chunks.NewAssignmentBuilder()
 	assignedVerifiersPerChunk := uint(len(bc.Approvers) / 2)
 	approvals := make(map[uint64]map[flow.Identifier]*flow.ResultApproval)
 	for _, chunk := range incorporatedResult.Result.Chunks {
-		assignedVerifiers := bc.Approvers.Sample(assignedVerifiersPerChunk)
-		assignment.Add(chunk, assignedVerifiers.NodeIDs())
+		assignedVerifiers, err := bc.Approvers.Sample(assignedVerifiersPerChunk)
+		require.NoError(bc.T(), err)
+		require.NoError(bc.T(), assignmentBuilder.Add(chunk.Index, assignedVerifiers.NodeIDs()))
 
 		// generate approvals
 		chunkApprovals := make(map[flow.Identifier]*flow.ResultApproval)
@@ -521,7 +531,7 @@ func (bc *BaseChainSuite) ValidSubgraphFixture() subgraphFixture {
 		Result:             result,
 		PreviousResult:     previousResult,
 		IncorporatedResult: incorporatedResult,
-		Assignment:         assignment,
+		Assignment:         assignmentBuilder.Build(),
 		Approvals:          approvals,
 	}
 }
@@ -539,12 +549,13 @@ func (bc *BaseChainSuite) Extend(block *flow.Block) {
 			IncorporatedResult.WithIncorporatedBlockID(blockID))
 
 		// assign each chunk to 50% of validation Nodes and generate respective approvals
-		assignment := chunks.NewAssignment()
+		assignmentBuilder := chunks.NewAssignmentBuilder()
 		assignedVerifiersPerChunk := uint(len(bc.Approvers) / 2)
 		approvals := make(map[uint64]map[flow.Identifier]*flow.ResultApproval)
 		for _, chunk := range incorporatedResult.Result.Chunks {
-			assignedVerifiers := bc.Approvers.Sample(assignedVerifiersPerChunk)
-			assignment.Add(chunk, assignedVerifiers.NodeIDs())
+			assignedVerifiers, err := bc.Approvers.Sample(assignedVerifiersPerChunk)
+			require.NoError(bc.T(), err)
+			require.NoError(bc.T(), assignmentBuilder.Add(chunk.Index, assignedVerifiers.NodeIDs()))
 
 			// generate approvals
 			chunkApprovals := make(map[flow.Identifier]*flow.ResultApproval)
@@ -553,6 +564,7 @@ func (bc *BaseChainSuite) Extend(block *flow.Block) {
 			}
 			approvals[chunk.Index] = chunkApprovals
 		}
+		assignment := assignmentBuilder.Build()
 		bc.Assigner.On("Assign", incorporatedResult.Result, incorporatedResult.IncorporatedBlockID).Return(assignment, nil).Maybe()
 		bc.Assignments[incorporatedResult.Result.ID()] = assignment
 		bc.PersistedResults[result.ID()] = result
@@ -562,7 +574,7 @@ func (bc *BaseChainSuite) Extend(block *flow.Block) {
 	}
 }
 
-// addSubgraphFixtureToMempools adds add entities in subgraph to mempools and persistent storage mocks
+// AddSubgraphFixtureToMempools adds entities in subgraph to mempools and persistent storage mocks
 func (bc *BaseChainSuite) AddSubgraphFixtureToMempools(subgraph subgraphFixture) {
 	bc.Blocks[subgraph.ParentBlock.ID()] = subgraph.ParentBlock
 	bc.Blocks[subgraph.Block.ID()] = subgraph.Block

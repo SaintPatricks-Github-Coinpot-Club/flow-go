@@ -3,122 +3,101 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
-	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"cloud.google.com/go/bigquery"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"gopkg.in/yaml.v3"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	flowsdk "github.com/onflow/flow-go-sdk"
 	"github.com/onflow/flow-go-sdk/access"
 	client "github.com/onflow/flow-go-sdk/access/grpc"
 
-	"github.com/onflow/flow-go/cmd/build"
 	"github.com/onflow/flow-go/integration/benchmark"
+	"github.com/onflow/flow-go/integration/benchmark/load"
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/metrics"
 	"github.com/onflow/flow-go/utils/unittest"
 )
 
-type LoadCase struct {
-	tps      uint
-	duration time.Duration
-}
-
-// This struct is used for uploading data to BigQuery.
-type dataSlice struct {
-	GoVersion           string    `bigquery:"goVersion"`
-	OsVersion           string    `bigquery:"osVersion"`
-	GitSha              string    `bigquery:"gitSha"`
-	StartTime           time.Time `bigquery:"startTime"`
-	EndTime             time.Time `bigquery:"endTime"`
-	InputTps            float64   `bigquery:"inputTps"`
-	OutputTps           float64   `bigquery:"outputTps"`
-	StartExecutionCount int       `bigquery:"startExecutionCount"`
-	EndExecutionCount   int       `bigquery:"endExecutionCount"`
-	RunStartTime        time.Time `bigquery:"runStartTime"`
+type BenchmarkInfo struct {
+	BenchmarkType string
 }
 
 // Hardcoded CI values
 const (
-	loadType                    = "token-transfer"
+	defaultLoadType             = load.TokenTransferLoadType
 	metricport                  = uint(8080)
-	accessNodeAddress           = "127.0.0.1:3569"
-	pushgateway                 = "127.0.0.1:9091"
-	accountMultiplier           = 100
+	accessNodeAddress           = "127.0.0.1:4001"
+	accountMultiplier           = 50
 	feedbackEnabled             = true
 	serviceAccountPrivateKeyHex = unittest.ServiceAccountPrivateKeyHex
+
+	defaultAdjustInterval           = 10 * time.Second
+	defaultMetricCollectionInterval = 20 * time.Second
+
+	// gRPC constants
+	defaultMaxMsgSize = 1024 * 1024 * 16 // 16 MB
 )
 
 func main() {
-	// holdover flags from loader/main.go
 	logLvl := flag.String("log-level", "info", "set log level")
-	profilerEnabled := flag.Bool("profiler-enabled", false, "whether to enable the auto-profiler")
-	maxConstExecTxSizeInBytes := flag.Uint("const-exec-max-tx-size", flow.DefaultMaxTransactionByteSize/10, "max byte size of constant exec transaction size to generate")
-	authAccNumInConstExecTx := flag.Uint("const-exec-num-authorizer", 1, "num of authorizer for each constant exec transaction to generate")
-	argSizeInByteInConstExecTx := flag.Uint("const-exec-arg-size", 100, "byte size of tx argument for each constant exec transaction to generate")
-	payerKeyCountInConstExecTx := flag.Uint("const-exec-payer-key-count", 2, "num of payer keys for each constant exec transaction to generate")
 
 	// CI relevant flags
-	tpsFlag := flag.String("tps", "300", "transactions per second (TPS) to send, accepts a comma separated list of values if used in conjunction with `tps-durations`")
-	tpsDurationsFlag := flag.String("tps-durations", "10m", "duration that each load test will run, accepts a comma separted list that will be applied to multiple values of the `tps` flag (defaults to infinite if not provided, meaning only the first tps case will be tested; additional values will be ignored)")
-	bigQueryProjectFlag := flag.String("bigquery-project", "dapperlabs-data", "project name for the bigquery uploader")
-	bigQueryDatasetFlag := flag.String("bigquery-dataset", "dev_src_flow_tps_metrics", "dataset name for the bigquery uploader")
-	bigQueryTableFlag := flag.String("bigquery-table", "tpsslices", "table name for the bigquery uploader")
-	sliceSize := flag.String("slice-size", "2m", "the amount of time that each slice covers")
+	initialTPSFlag := flag.Int("tps-initial", 10, "starting transactions per second")
+	maxTPSFlag := flag.Int("tps-max", *initialTPSFlag, "maximum transactions per second allowed")
+	minTPSFlag := flag.Int("tps-min", *initialTPSFlag, "minimum transactions per second allowed")
+	loadTypeFlag := flag.String("load-type", string(defaultLoadType), "load type (token-transfer / const-exec / evm) from the load config file")
+	loadConfigFileLocationFlag := flag.String("load-config", "", "load config file location. If not provided, default config will be used.")
+
+	adjustIntervalFlag := flag.Duration("tps-adjust-interval", defaultAdjustInterval, "interval for adjusting TPS")
+	adjustDelayFlag := flag.Duration("tps-adjust-delay", 120*time.Second, "delay before adjusting TPS")
+	durationFlag := flag.Duration("duration", 10*time.Minute, "test duration")
+
+	statIntervalFlag := flag.Duration("stat-interval", defaultMetricCollectionInterval, "")
+	gitRepoPathFlag := flag.String("git-repo-path", "../..", "git repo path of the filesystem")
+	gitRepoURLFlag := flag.String("git-repo-url", "https://github.com/onflow/flow-go.git", "git repo URL")
+	bigQueryUpload := flag.Bool("bigquery-upload", true, "whether to upload results to BigQuery (true / false)")
+	pushgateway := flag.String("pushgateway", "disabled", "host:port for pushgateway")
+	bigQueryProjectFlag := flag.String("bigquery-project", "ff-data-platform", "project name for the bigquery uploader")
+	bigQueryDatasetFlag := flag.String("bigquery-dataset", "dev_src_flow_performance_metrics", "dataset name for the bigquery uploader")
+	bigQueryRawTableFlag := flag.String("bigquery-raw-table", "rawResults", "table name for the bigquery raw results")
 	flag.Parse()
 
-	// Version and Commit Info
-	gitSha := build.Commit()
-	goVersion := runtime.Version()
-	osVersion := runtime.GOOS + runtime.GOARCH
+	log := setupLogger(logLvl)
 
-	runStartTime := time.Now()
-	if gitSha == "undefined" {
-		gitSha = runStartTime.String()
+	loadConfig := getLoadConfig(
+		log,
+		*loadConfigFileLocationFlag,
+		*loadTypeFlag,
+		*minTPSFlag,
+		*maxTPSFlag,
+		*initialTPSFlag,
+	)
+
+	if *gitRepoPathFlag == "" {
+		flag.PrintDefaults()
+		log.Fatal().Msg("git repo path is required")
 	}
-
-	chainID := flowsdk.Emulator
-
-	// parse log level and apply to logger
-	log := zerolog.New(os.Stderr).With().Timestamp().Logger().Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	lvl, err := zerolog.ParseLevel(strings.ToLower(*logLvl))
-	if err != nil {
-		log.Fatal().Err(err).Msg("invalid log level")
-	}
-	log = log.Level(lvl)
-
-	server := metrics.NewServer(log, metricport, *profilerEnabled)
-	<-server.Ready()
-	loaderMetrics := metrics.NewLoaderCollector()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sp := benchmark.NewStatsPusher(ctx, log, pushgateway, "loader", prometheus.DefaultGatherer)
-	defer sp.Stop()
+	server := metrics.NewServer(log, metricport)
+	<-server.Ready()
+	loaderMetrics := metrics.NewLoaderCollector()
 
-	tps, err := strconv.ParseInt(*tpsFlag, 0, 32)
-	if err != nil {
-		log.Fatal().Err(err).Str("value", *tpsFlag).
-			Msg("could not parse tps flag")
+	if *pushgateway != "disabled" {
+		sp := benchmark.NewStatsPusher(ctx, log, *pushgateway, "loader", prometheus.DefaultGatherer)
+		defer sp.Stop()
 	}
-	tpsDuration, err := time.ParseDuration(*tpsDurationsFlag)
-	if err != nil {
-		log.Fatal().Err(err).Str("value", *tpsDurationsFlag).
-			Msg("could not parse tps-durations flag")
-	}
-	loadCase := LoadCase{tps: uint(tps), duration: tpsDuration}
 
-	addressGen := flowsdk.NewAddressGenerator(chainID)
+	addressGen := flowsdk.NewAddressGenerator(flowsdk.Emulator)
 	serviceAccountAddress := addressGen.NextAddress()
 	fungibleTokenAddress := addressGen.NextAddress()
 	flowTokenAddress := addressGen.NextAddress()
@@ -128,158 +107,234 @@ func main() {
 		Stringer("flowTokenAddress", flowTokenAddress).
 		Msg("addresses")
 
-	flowClient, err := client.NewClient(accessNodeAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	flowClient, err := client.NewClient(
+		accessNodeAddress,
+		client.WithGRPCDialOptions(
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(defaultMaxMsgSize),
+				grpc.MaxCallSendMsgSize(defaultMaxMsgSize),
+			),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		),
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to initialize Flow client")
 	}
 
+	// create context for a single benchmark run
+	bCtx, bCancel := context.WithCancel(ctx)
+
 	// prepare load generator
 	log.Info().
-		Str("load_type", loadType).
-		Uint("tps", loadCase.tps).
-		Dur("duration", loadCase.duration).
-		Msg("Running load case...")
+		Interface("loadConfig", loadConfig).
+		Dur("duration", *durationFlag).
+		Msg("Running load case")
+
+	maxInflight := *maxTPSFlag * accountMultiplier
+
+	workerStatsTracker := benchmark.NewWorkerStatsTracker(bCtx)
+	defer workerStatsTracker.Stop()
+
+	statsLogger := benchmark.NewPeriodicStatsLogger(ctx, workerStatsTracker, log)
+	statsLogger.Start()
+	defer statsLogger.Stop()
+
+	loadParams := benchmark.LoadParams{
+		NumberOfAccounts: maxInflight,
+		LoadConfig:       loadConfig,
+		FeedbackEnabled:  feedbackEnabled,
+	}
 
 	lg, err := benchmark.New(
-		ctx,
+		bCtx,
 		log,
+		workerStatsTracker,
 		loaderMetrics,
 		[]access.Client{flowClient},
 		benchmark.NetworkParams{
-			ServAccPrivKeyHex:     serviceAccountPrivateKeyHex,
-			ServiceAccountAddress: &serviceAccountAddress,
-			FungibleTokenAddress:  &fungibleTokenAddress,
-			FlowTokenAddress:      &flowTokenAddress,
+			ServAccPrivKeyHex: serviceAccountPrivateKeyHex,
+			ChainId:           flow.Emulator,
 		},
-		benchmark.LoadParams{
-			NumberOfAccounts: int(loadCase.tps) * accountMultiplier,
-			LoadType:         benchmark.LoadType(loadType),
-			FeedbackEnabled:  feedbackEnabled,
-		},
-		benchmark.ConstExecParams{
-			MaxTxSizeInByte: *maxConstExecTxSizeInBytes,
-			AuthAccountNum:  *authAccNumInConstExecTx,
-			ArgSizeInByte:   *argSizeInByteInConstExecTx,
-			PayerKeyCount:   *payerKeyCountInConstExecTx,
-		},
+		loadParams,
 	)
+
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to create new cont load generator")
 	}
 
-	err = lg.Init()
-	if err != nil {
-		log.Fatal().Err(err).Msg("unable to init loader")
-	}
+	adjuster := benchmark.NewTPSAdjuster(
+		ctx,
+		log,
+		lg,
+		workerStatsTracker,
+		benchmark.AdjusterParams{
+			Delay:       *adjustDelayFlag,
+			Interval:    *adjustIntervalFlag,
+			InitialTPS:  uint(loadParams.LoadConfig.TPSInitial),
+			MinTPS:      uint(loadParams.LoadConfig.TpsMin),
+			MaxTPS:      uint(loadParams.LoadConfig.TpsMax),
+			MaxInflight: uint(loadParams.NumberOfAccounts / 2),
+		},
+	)
+	defer adjuster.Stop()
 
-	// run load
-	err = lg.SetTPS(loadCase.tps)
+	// start the load with the initial TPS
+	err = lg.SetTPS(uint(loadConfig.TPSInitial))
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to set tps")
 	}
-	// TODO(rbtz): pass metrics to the load generator
-	loaderMetrics.SetTPSConfigured(loadCase.tps)
 
-	// prepare data slices
-	sliceDuration, _ := time.ParseDuration(*sliceSize)
-	var dataSlices []dataSlice
+	recorder := NewTPSRecorder(bCtx, workerStatsTracker, *statIntervalFlag)
+	defer recorder.Stop()
 
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		dataSlices = recordTransactionData(
-			lg,
-			sliceDuration,
-			runStartTime,
-			gitSha,
-			goVersion,
-			osVersion)
-	}()
-
+	log.Info().Msg("Waiting for load to finish")
 	select {
-	case <-time.After(loadCase.duration):
-	case <-ctx.Done(): //TODO: the loader currently doesn't ever cancel the context
-		// add logging here to express the *why* of lg choose to cancel the context.
-		// when the loader cancels its own context it may also call Stop() on itself
-		// this may become redundant.
+	case <-time.After(*durationFlag):
+	case <-bCtx.Done():
+		log.Warn().Err(bCtx.Err()).Msg("loader context canceled")
 	}
+
+	log.Info().Msg("Cancelling benchmark context")
+	bCancel()
+	recorder.Stop()
+
+	log.Info().Msg("Stopping load generator")
 	lg.Stop()
-	wg.Wait()
 
-	if len(dataSlices) == 0 {
-		log.Fatal().Msg("no data slices recorded")
+	mustValidateData(log, recorder)
+
+	// only upload valid data
+	if *bigQueryUpload {
+		repoInfo := MustGetRepoInfo(log, *gitRepoURLFlag, *gitRepoPathFlag)
+		mustUploadData(ctx, log, recorder, repoInfo, *bigQueryProjectFlag, *bigQueryDatasetFlag, *bigQueryRawTableFlag, loadConfig.LoadName)
+	} else {
+		log.Info().Int("raw_tps_size", len(recorder.BenchmarkResults.RawTPS)).Msg("logging tps results locally")
+		// log results locally when not uploading to BigQuery
+		for i, tpsRecord := range recorder.BenchmarkResults.RawTPS {
+			log.Info().Int("tps_record_index", i).Interface("tpsRecord", tpsRecord).Msg("tps_record")
+		}
+	}
+}
+
+func getLoadConfig(
+	log zerolog.Logger,
+	loadConfigLocation string,
+	load string,
+	minTPS int,
+	maxTPS int,
+	initialTPS int,
+) benchmark.LoadConfig {
+	if loadConfigLocation == "" {
+		lc := benchmark.LoadConfig{
+			LoadName:   load,
+			LoadType:   load,
+			TpsMax:     maxTPS,
+			TpsMin:     minTPS,
+			TPSInitial: initialTPS,
+		}
+
+		log.Info().
+			Interface("loadConfig", lc).
+			Msg("Load config file not provided, using parameters supplied in TPS flags")
+		return lc
 	}
 
-	err = sendDataToBigQuery(ctx, *bigQueryProjectFlag, *bigQueryDatasetFlag, *bigQueryTableFlag, dataSlices)
+	var loadConfigs map[string]benchmark.LoadConfig
+
+	// check if the file exists
+	if _, err := os.Stat(loadConfigLocation); os.IsNotExist(err) {
+		log.Fatal().Err(err).Str("loadConfigLocation", loadConfigLocation).Msg("load config file not found")
+	}
+
+	yamlFile, err := os.ReadFile(loadConfigLocation)
+	if err != nil {
+		log.Fatal().Err(err).Str("loadConfigLocation", loadConfigLocation).Msg("failed to read load config file")
+	}
+
+	err = yaml.Unmarshal(yamlFile, &loadConfigs)
+	if err != nil {
+		log.Fatal().Err(err).Str("loadConfigLocation", loadConfigLocation).Msg("failed to unmarshal load config file")
+	}
+
+	lc, ok := loadConfigs[load]
+	if !ok {
+		log.Fatal().Str("load", load).Msg("load not found in load config file")
+	}
+	lc.LoadName = load
+
+	return lc
+}
+
+// setupLogger parses log level and apply to logger
+func setupLogger(logLvl *string) zerolog.Logger {
+	log := zerolog.New(os.Stderr).
+		With().
+		Timestamp().
+		Logger().
+		Output(zerolog.ConsoleWriter{Out: os.Stderr})
+
+	lvl, err := zerolog.ParseLevel(strings.ToLower(*logLvl))
+	if err != nil {
+		log.Fatal().Err(err).Str("strLevel", *logLvl).Msg("invalid log level")
+	}
+	log = log.Level(lvl)
+	return log
+}
+
+func mustUploadData(
+	ctx context.Context,
+	log zerolog.Logger,
+	recorder *TPSRecorder,
+	repoInfo *RepoInfo,
+	bigQueryProject string,
+	bigQueryDataset string,
+	bigQueryRawTable string,
+	loadName string,
+) {
+	log.Info().Msg("Initializing BigQuery")
+	db, err := NewDB(ctx, log, bigQueryProject)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to create bigquery client")
+	}
+	defer func(db *DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to close bigquery client")
+		}
+	}(db)
+
+	err = db.createTable(ctx, bigQueryDataset, bigQueryRawTable, RawRecord{})
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to create raw TPS table")
+	}
+
+	log.Info().Msg("Uploading data to BigQuery")
+	err = db.saveRawResults(
+		ctx,
+		bigQueryDataset,
+		bigQueryRawTable,
+		recorder.BenchmarkResults,
+		*repoInfo,
+		BenchmarkInfo{BenchmarkType: loadName},
+		MustGetDefaultEnvironment(),
+	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to send data to bigquery")
 	}
 }
 
-func recordTransactionData(
-	lg *benchmark.ContLoadGenerator,
-	sliceDuration time.Duration,
-	runStartTime time.Time,
-	gitSha, goVersion, osVersion string,
-) []dataSlice {
-	var dataSlices []dataSlice
-
-	// get initial values for first slice
-	startTime := time.Now()
-	startExecutedTransactions := lg.GetTxExecuted()
-
-	t := time.NewTicker(sliceDuration)
-	defer t.Stop()
-
-	for {
-		select {
-		case <-t.C:
-			endTime := time.Now()
-			endExecutedTransaction := lg.GetTxExecuted()
-
-			// calculate this slice
-			inputTps := lg.AvgTpsBetween(startTime, endTime)
-			outputTps := float64(endExecutedTransaction-startExecutedTransactions) / sliceDuration.Seconds()
-			dataSlices = append(dataSlices,
-				dataSlice{
-					GitSha:              gitSha,
-					GoVersion:           goVersion,
-					OsVersion:           osVersion,
-					StartTime:           startTime,
-					EndTime:             endTime,
-					InputTps:            inputTps,
-					OutputTps:           outputTps,
-					StartExecutionCount: startExecutedTransactions,
-					EndExecutionCount:   endExecutedTransaction,
-					RunStartTime:        runStartTime,
-				})
-
-			// set start values for next slice
-			startExecutedTransactions = endExecutedTransaction
-			startTime = endTime
-		case <-lg.Done():
-			return dataSlices
-		}
+func mustValidateData(log zerolog.Logger, recorder *TPSRecorder) {
+	log.Info().Msg("Validating data")
+	var totalTPS float64
+	for _, record := range recorder.BenchmarkResults.RawTPS {
+		totalTPS += record.OutputTPS
 	}
-}
-
-func sendDataToBigQuery(
-	ctx context.Context,
-	projectName, datasetName, tableName string,
-	slices []dataSlice,
-) error {
-	bqClient, err := bigquery.NewClient(ctx, projectName)
-	if err != nil {
-		return fmt.Errorf("unable to create bigquery client: %w", err)
+	resultLen := len(recorder.BenchmarkResults.RawTPS)
+	if resultLen == 0 || totalTPS == 0 {
+		recorder.SetStatus(StatusFailure)
+		log.Fatal().
+			Int("resultsLen", resultLen).
+			Float64("totalTPS", totalTPS).
+			Msg("no TPS data generated")
 	}
-	defer bqClient.Close()
-
-	dataset := bqClient.Dataset(datasetName)
-	table := dataset.Table(tableName)
-
-	if err := table.Inserter().Put(ctx, slices); err != nil {
-		return fmt.Errorf("failed to insert data: %w", err)
-	}
-	return nil
 }
