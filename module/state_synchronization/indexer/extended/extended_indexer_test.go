@@ -95,7 +95,8 @@ func newMockState(t *testing.T) protocol.State {
 
 type testSetup struct {
 	db          storage.DB
-	blocks      *storagemock.Blocks
+	index       *storagemock.Index
+	headers     *storagemock.Headers
 	collections *storagemock.Collections
 	events      *storagemock.Events
 	results     *storagemock.LightTransactionResults
@@ -104,7 +105,8 @@ type testSetup struct {
 func newTestSetup(t *testing.T) *testSetup {
 	return &testSetup{
 		db:          newTestDB(t),
-		blocks:      storagemock.NewBlocks(t),
+		index:       storagemock.NewIndex(t),
+		headers:     storagemock.NewHeaders(t),
 		collections: storagemock.NewCollections(t),
 		events:      storagemock.NewEvents(t),
 		results:     storagemock.NewLightTransactionResults(t),
@@ -112,17 +114,34 @@ func newTestSetup(t *testing.T) *testSetup {
 }
 
 // configureBackfill sets up storage mock expectations for backfill scenarios.
-// blocks.ByHeight returns block fixtures, events.ByBlockID returns a single event.
+// headers.BlockIDByHeight returns a deterministic block ID, headers.ByBlockID returns the
+// corresponding header, index.ByBlockID returns an empty index, events.ByBlockID returns a
+// single event.
 func (s *testSetup) configureBackfill() {
-	s.blocks.
-		On("ByHeight", mock.AnythingOfType("uint64")).
-		Return(func(height uint64) (*flow.Block, error) {
-			block := unittest.BlockFixture(func(b *flow.Block) {
-				b.Height = height
-				b.Payload.Guarantees = nil
-			})
-			return block, nil
+	var headersByID sync.Map
+
+	s.headers.
+		On("BlockIDByHeight", mock.AnythingOfType("uint64")).
+		Return(func(height uint64) (flow.Identifier, error) {
+			header := unittest.BlockHeaderFixture()
+			header.Height = height
+			headersByID.Store(header.ID(), header)
+			return header.ID(), nil
 		})
+
+	s.headers.
+		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
+		Return(func(blockID flow.Identifier) (*flow.Header, error) {
+			val, ok := headersByID.Load(blockID)
+			if !ok {
+				return nil, storage.ErrNotFound
+			}
+			return val.(*flow.Header), nil
+		})
+
+	s.index.
+		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
+		Return(&flow.Index{}, nil)
 
 	s.events.
 		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
@@ -141,7 +160,8 @@ func (s *testSetup) newExtendedIndexer(
 		s.db,
 		storage.NewTestingLockManager(),
 		state,
-		s.blocks,
+		s.index,
+		s.headers,
 		s.collections,
 		s.events,
 		s.results,
@@ -295,23 +315,39 @@ func TestExtendedIndexer_UninitializedNotFoundThenCatchUp(t *testing.T) {
 	db := newTestDB(t)
 
 	// Storage starts returning ErrNotFound, then switches to returning data after a delay.
-	blocks := storagemock.NewBlocks(t)
+	headers := storagemock.NewHeaders(t)
+	index := storagemock.NewIndex(t)
 	collections := storagemock.NewCollections(t)
 	events := storagemock.NewEvents(t)
 
+	var headersByID sync.Map
+
 	available := atomic.NewBool(false)
-	blocks.
-		On("ByHeight", mock.AnythingOfType("uint64")).
-		Return(func(height uint64) (*flow.Block, error) {
+	headers.
+		On("BlockIDByHeight", mock.AnythingOfType("uint64")).
+		Return(func(height uint64) (flow.Identifier, error) {
 			if !available.Load() {
+				return flow.ZeroID, storage.ErrNotFound
+			}
+			header := unittest.BlockHeaderFixture()
+			header.Height = height
+			headersByID.Store(header.ID(), header)
+			return header.ID(), nil
+		})
+
+	headers.
+		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
+		Return(func(blockID flow.Identifier) (*flow.Header, error) {
+			val, ok := headersByID.Load(blockID)
+			if !ok {
 				return nil, storage.ErrNotFound
 			}
-			block := unittest.BlockFixture(func(b *flow.Block) {
-				b.Height = height
-				b.Payload.Guarantees = nil
-			})
-			return block, nil
+			return val.(*flow.Header), nil
 		})
+
+	index.
+		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
+		Return(&flow.Index{}, nil)
 
 	events.
 		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
@@ -325,7 +361,10 @@ func TestExtendedIndexer_UninitializedNotFoundThenCatchUp(t *testing.T) {
 		db,
 		storage.NewTestingLockManager(),
 		newMockState(t),
-		blocks, collections, events,
+		index,
+		headers,
+		collections,
+		events,
 		storagemock.NewLightTransactionResults(t),
 		[]extended.Indexer{idx},
 		flow.Testnet,
