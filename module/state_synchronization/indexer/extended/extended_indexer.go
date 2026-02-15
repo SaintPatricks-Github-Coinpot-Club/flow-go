@@ -254,8 +254,8 @@ func (c *ExtendedIndexer) indexNextHeights(ctx context.Context) (bool, error) {
 	hasBackfillingIndexers := len(backfillGroups) > 0
 
 	for height, group := range backfillGroups {
-		// data, err := c.blockDataFromStoredExecutionData(ctx, height, latestBlockData)
-		data, err := c.blockDataFromStorage(ctx, height, latestBlockData)
+		data, err := c.blockDataFromStoredExecutionData(ctx, height, latestBlockData)
+		// data, err := c.blockDataFromStorage(ctx, height, latestBlockData)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue // skip group for this iteration
