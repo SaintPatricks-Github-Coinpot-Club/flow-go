@@ -16,6 +16,8 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/module/executiondatasync/execution_data"
+	executiondatamock "github.com/onflow/flow-go/module/executiondatasync/execution_data/mock"
 	"github.com/onflow/flow-go/module/irrecoverable"
 	"github.com/onflow/flow-go/module/metrics"
 	"github.com/onflow/flow-go/module/state_synchronization/indexer/extended"
@@ -94,29 +96,33 @@ func newMockState(t *testing.T) protocol.State {
 }
 
 type testSetup struct {
-	db          storage.DB
-	index       *storagemock.Index
-	headers     *storagemock.Headers
-	collections *storagemock.Collections
-	events      *storagemock.Events
-	results     *storagemock.LightTransactionResults
+	db                 storage.DB
+	index              *storagemock.Index
+	headers            *storagemock.Headers
+	guarantees         *storagemock.Guarantees
+	collections        *storagemock.Collections
+	events             *storagemock.Events
+	results            *storagemock.LightTransactionResults
+	executionDataCache *executiondatamock.ExecutionDataCache
 }
 
 func newTestSetup(t *testing.T) *testSetup {
 	return &testSetup{
-		db:          newTestDB(t),
-		index:       storagemock.NewIndex(t),
-		headers:     storagemock.NewHeaders(t),
-		collections: storagemock.NewCollections(t),
-		events:      storagemock.NewEvents(t),
-		results:     storagemock.NewLightTransactionResults(t),
+		db:                 newTestDB(t),
+		index:              storagemock.NewIndex(t),
+		headers:            storagemock.NewHeaders(t),
+		guarantees:         storagemock.NewGuarantees(t),
+		collections:        storagemock.NewCollections(t),
+		events:             storagemock.NewEvents(t),
+		results:            storagemock.NewLightTransactionResults(t),
+		executionDataCache: executiondatamock.NewExecutionDataCache(t),
 	}
 }
 
 // configureBackfill sets up storage mock expectations for backfill scenarios.
 // headers.BlockIDByHeight returns a deterministic block ID, headers.ByBlockID returns the
-// corresponding header, index.ByBlockID returns an empty index, events.ByBlockID returns a
-// single event.
+// corresponding header, executionDataCache.ByBlockID returns execution data with a single
+// chunk containing one event.
 func (s *testSetup) configureBackfill() {
 	var headersByID sync.Map
 
@@ -139,13 +145,27 @@ func (s *testSetup) configureBackfill() {
 			return val.(*flow.Header), nil
 		})
 
-	s.index.
-		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
-		Return(&flow.Index{}, nil)
-
-	s.events.
-		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
-		Return([]flow.Event{unittest.EventFixture()}, nil)
+	s.executionDataCache.
+		On("ByBlockID", mock.Anything, mock.AnythingOfType("flow.Identifier")).
+		Return(
+			func(_ context.Context, blockID flow.Identifier) *execution_data.BlockExecutionDataEntity {
+				return execution_data.NewBlockExecutionDataEntity(
+					flow.ZeroID,
+					&execution_data.BlockExecutionData{
+						BlockID: blockID,
+						ChunkExecutionDatas: []*execution_data.ChunkExecutionData{
+							{
+								Collection: &flow.Collection{},
+								Events:     flow.EventsList{unittest.EventFixture()},
+							},
+						},
+					},
+				)
+			},
+			func(_ context.Context, _ flow.Identifier) error {
+				return nil
+			},
+		)
 }
 
 func (s *testSetup) newExtendedIndexer(
@@ -162,12 +182,14 @@ func (s *testSetup) newExtendedIndexer(
 		state,
 		s.index,
 		s.headers,
+		s.guarantees,
 		s.collections,
 		s.events,
 		s.results,
 		indexers,
 		flow.Testnet,
 		backfillDelay,
+		s.executionDataCache,
 	)
 	require.NoError(t, err)
 	return ext
@@ -316,9 +338,7 @@ func TestExtendedIndexer_UninitializedNotFoundThenCatchUp(t *testing.T) {
 
 	// Storage starts returning ErrNotFound, then switches to returning data after a delay.
 	headers := storagemock.NewHeaders(t)
-	index := storagemock.NewIndex(t)
-	collections := storagemock.NewCollections(t)
-	events := storagemock.NewEvents(t)
+	edCache := executiondatamock.NewExecutionDataCache(t)
 
 	var headersByID sync.Map
 
@@ -345,13 +365,27 @@ func TestExtendedIndexer_UninitializedNotFoundThenCatchUp(t *testing.T) {
 			return val.(*flow.Header), nil
 		})
 
-	index.
-		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
-		Return(&flow.Index{}, nil)
-
-	events.
-		On("ByBlockID", mock.AnythingOfType("flow.Identifier")).
-		Return([]flow.Event{unittest.EventFixture()}, nil)
+	edCache.
+		On("ByBlockID", mock.Anything, mock.AnythingOfType("flow.Identifier")).
+		Return(
+			func(_ context.Context, blockID flow.Identifier) *execution_data.BlockExecutionDataEntity {
+				return execution_data.NewBlockExecutionDataEntity(
+					flow.ZeroID,
+					&execution_data.BlockExecutionData{
+						BlockID: blockID,
+						ChunkExecutionDatas: []*execution_data.ChunkExecutionData{
+							{
+								Collection: &flow.Collection{},
+								Events:     flow.EventsList{unittest.EventFixture()},
+							},
+						},
+					},
+				)
+			},
+			func(_ context.Context, _ flow.Identifier) error {
+				return nil
+			},
+		)
 
 	idx := newMockIndexer(t, "a", 5, 5)
 
@@ -361,14 +395,16 @@ func TestExtendedIndexer_UninitializedNotFoundThenCatchUp(t *testing.T) {
 		db,
 		storage.NewTestingLockManager(),
 		newMockState(t),
-		index,
+		storagemock.NewIndex(t),
 		headers,
-		collections,
-		events,
+		storagemock.NewGuarantees(t),
+		storagemock.NewCollections(t),
+		storagemock.NewEvents(t),
 		storagemock.NewLightTransactionResults(t),
 		[]extended.Indexer{idx},
 		flow.Testnet,
 		time.Millisecond,
+		edCache,
 	)
 	require.NoError(t, err)
 	startComponent(t, ext)

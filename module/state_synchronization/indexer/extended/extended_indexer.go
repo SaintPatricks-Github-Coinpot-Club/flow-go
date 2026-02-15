@@ -1,6 +1,7 @@
 package extended
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -51,11 +52,13 @@ type ExtendedIndexer struct {
 	chainID     flow.ChainID
 	state       protocol.State
 	headers     storage.Headers
-	indexes     storage.Index
-	blocks      storage.Blocks
+	index       storage.Index
 	collections storage.Collections
+	guarantees  storage.Guarantees
 	events      storage.Events
 	results     storage.LightTransactionResults
+
+	executionDataCache execution_data.ExecutionDataCache
 
 	systemCollections *access.Versioned[access.SystemCollectionBuilder]
 
@@ -80,12 +83,14 @@ func NewExtendedIndexer(
 	state protocol.State,
 	index storage.Index,
 	headers storage.Headers,
+	guarantees storage.Guarantees,
 	collections storage.Collections,
 	events storage.Events,
 	results storage.LightTransactionResults,
 	indexers []Indexer,
 	chainID flow.ChainID,
 	backfillDelay time.Duration,
+	executionDataCache execution_data.ExecutionDataCache,
 ) (*ExtendedIndexer, error) {
 	if metrics == nil {
 		// this is here mostly for anyone that imports this within an external package.
@@ -102,14 +107,16 @@ func NewExtendedIndexer(
 		indexers:      indexers,
 		notifier:      engine.NewNotifier(),
 
-		chainID:           chainID,
-		state:             state,
-		headers:           headers,
-		indexes:           index,
-		collections:       collections,
-		events:            events,
-		results:           results,
-		systemCollections: systemcollection.Default(chainID),
+		chainID:            chainID,
+		state:              state,
+		headers:            headers,
+		index:              index,
+		guarantees:         guarantees,
+		collections:        collections,
+		events:             events,
+		results:            results,
+		systemCollections:  systemcollection.Default(chainID),
+		executionDataCache: executionDataCache,
 	}
 
 	c.Component = component.NewComponentManagerBuilder().
@@ -202,7 +209,7 @@ func (c *ExtendedIndexer) ingestLoop(ctx irrecoverable.SignalerContext, ready co
 		}
 		// TODO: do we need to enforce a minimum delay?
 
-		hasBackfillingIndexers, err := c.indexNextHeights()
+		hasBackfillingIndexers, err := c.indexNextHeights(ctx)
 		if err != nil {
 			ctx.Throw(fmt.Errorf("failed to check all: %w", err))
 			return
@@ -224,7 +231,7 @@ func (c *ExtendedIndexer) ingestLoop(ctx irrecoverable.SignalerContext, ready co
 // NOT CONCURRENCY SAFE.
 //
 // No error returns are expected during normal operation.
-func (c *ExtendedIndexer) indexNextHeights() (bool, error) {
+func (c *ExtendedIndexer) indexNextHeights(ctx context.Context) (bool, error) {
 	c.mu.RLock()
 	latestBlockData := c.latestBlockData
 	c.mu.RUnlock()
@@ -247,7 +254,8 @@ func (c *ExtendedIndexer) indexNextHeights() (bool, error) {
 	hasBackfillingIndexers := len(backfillGroups) > 0
 
 	for height, group := range backfillGroups {
-		data, err := c.blockDataFromStorage(height, latestBlockData)
+		// data, err := c.blockDataFromStoredExecutionData(ctx, height, latestBlockData)
+		data, err := c.blockDataFromStorage(ctx, height, latestBlockData)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue // skip group for this iteration
@@ -294,7 +302,7 @@ func (c *ExtendedIndexer) runIndexers(indexers []Indexer, data *BlockData) error
 //
 // Expected error returns during normal operation:
 //   - [storage.ErrNotFound]: if any data is not available for the height.
-func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *BlockData) (BlockData, error) {
+func (c *ExtendedIndexer) blockDataFromStorage(_ context.Context, height uint64, latestBlockData *BlockData) (BlockData, error) {
 	// special handling for the spork root block which has no transactions or events.
 	if height == c.state.Params().SporkRootBlockHeight() {
 		return BlockData{
@@ -319,7 +327,7 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 		return BlockData{}, fmt.Errorf("failed to get header by id: %w", err)
 	}
 
-	blockIndex, err := c.indexes.ByBlockID(blockID)
+	blockIndex, err := c.index.ByBlockID(blockID)
 	if err != nil {
 		return BlockData{}, fmt.Errorf("failed to get block index by block id: %w", err)
 	}
@@ -347,6 +355,18 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 
 	var transactions []*flow.TransactionBody
 	for _, guaranteeID := range blockIndex.GuaranteeIDs {
+		guarantee, err := c.guarantees.ByID(guaranteeID)
+		if err != nil {
+			return BlockData{}, fmt.Errorf("failed to get guarantee by id: %w", err)
+		}
+		collection, err := c.collections.ByID(guarantee.CollectionID)
+		if err != nil {
+			return BlockData{}, fmt.Errorf("failed to get collection by id: %w", err)
+		}
+		transactions = append(transactions, collection.Transactions...)
+	}
+
+	for _, guaranteeID := range blockIndex.GuaranteeIDs {
 		collection, err := c.collections.ByID(guaranteeID)
 		if err != nil {
 			return BlockData{}, fmt.Errorf("failed to get collection by id: %w", err)
@@ -369,6 +389,56 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 	}, nil
 }
 
+// blockDataFromStoredExecutionData loads the block data for the given height from the execution data cache.
+//
+// Expected error returns during normal operation:
+//   - [storage.ErrNotFound]: if any data is not available for the height.
+//   - [execution_data.BlockNotFoundError]: if the execution data is not available for the block.
+func (c *ExtendedIndexer) blockDataFromStoredExecutionData(ctx context.Context, height uint64, latestBlockData *BlockData) (BlockData, error) {
+	// special handling for the spork root block which has no transactions or events.
+	if height == c.state.Params().SporkRootBlockHeight() {
+		return BlockData{
+			Header: c.state.Params().SporkRootBlock().ToHeader(),
+		}, nil
+	}
+
+	// `latestBlockData` is considered the "live" block, so don't allow backfilling for higher heights.
+	// if we haven't seen the live block yet and the data isn't indexed into the db, the events check
+	// below will fail and return a not found error.
+	if latestBlockData != nil && height > latestBlockData.Header.Height {
+		return BlockData{}, fmt.Errorf("data for block %d not available yet: %w", height, storage.ErrNotFound)
+	}
+
+	blockID, err := c.headers.BlockIDByHeight(height)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to get block id by height: %w", err)
+	}
+
+	header, err := c.headers.ByBlockID(blockID)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to get header by id: %w", err)
+	}
+
+	executionData, err := c.executionDataCache.ByBlockID(ctx, blockID)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to get execution data by block id: %w", err)
+	}
+
+	txs, events, err := c.extractDataFromExecutionData(height, executionData)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to extract data from execution data: %w", err)
+	}
+
+	return BlockData{
+		Header:       header,
+		Transactions: txs,
+		Events:       groupEventsByTxIndex(events),
+	}, nil
+}
+
+// extractDataFromExecutionData extracts the transactions and events from the execution data.
+//
+// No error returns are expected during normal operation.
 func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *execution_data.BlockExecutionDataEntity) ([]*flow.TransactionBody, []flow.Event, error) {
 	// NOTE: FVM assigns TransactionIndex globally across the whole block (all user txs in
 	// collection order, then system/scheduled txs). Flattening chunks in order keeps txIndex

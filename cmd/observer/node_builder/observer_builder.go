@@ -1648,12 +1648,14 @@ func (builder *ObserverServiceBuilder) BuildExecutionSyncComponents() *ObserverS
 					utils.NotNil(builder.State),
 					utils.NotNil(builder.Storage.Index),
 					utils.NotNil(builder.Storage.Headers),
+					utils.NotNil(builder.Storage.Guarantees),
 					utils.NotNil(builder.Storage.Collections),
 					utils.NotNil(builder.events),
 					utils.NotNil(builder.lightTransactionResults),
 					extendedIndexers,
 					node.RootChainID,
 					builder.extendedIndexingBackfillDelay,
+					executionDataStoreCache,
 				)
 				if err != nil {
 					return nil, fmt.Errorf("could not create extended indexer: %w", err)
