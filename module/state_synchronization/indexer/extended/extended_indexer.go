@@ -254,8 +254,8 @@ func (c *ExtendedIndexer) indexNextHeights(ctx context.Context) (bool, error) {
 	hasBackfillingIndexers := len(backfillGroups) > 0
 
 	for height, group := range backfillGroups {
-		data, err := c.blockDataFromStoredExecutionData(ctx, height, latestBlockData)
-		// data, err := c.blockDataFromStorage(ctx, height, latestBlockData)
+		// data, err := c.blockDataFromStoredExecutionData(ctx, height, latestBlockData)
+		data, err := c.blockDataFromStorage(ctx, height, latestBlockData)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue // skip group for this iteration
@@ -360,14 +360,6 @@ func (c *ExtendedIndexer) blockDataFromStorage(_ context.Context, height uint64,
 			return BlockData{}, fmt.Errorf("failed to get guarantee by id: %w", err)
 		}
 		collection, err := c.collections.ByID(guarantee.CollectionID)
-		if err != nil {
-			return BlockData{}, fmt.Errorf("failed to get collection by id: %w", err)
-		}
-		transactions = append(transactions, collection.Transactions...)
-	}
-
-	for _, guaranteeID := range blockIndex.GuaranteeIDs {
-		collection, err := c.collections.ByID(guaranteeID)
 		if err != nil {
 			return BlockData{}, fmt.Errorf("failed to get collection by id: %w", err)
 		}
