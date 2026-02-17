@@ -3,9 +3,9 @@ package testutils
 import (
 	"fmt"
 
+	"github.com/onflow/cadence"
 	"github.com/onflow/cadence/sema"
 
-	"github.com/onflow/cadence"
 	"github.com/onflow/flow-go/fvm/evm/stdlib"
 	"github.com/onflow/flow-go/fvm/evm/types"
 )
