@@ -64,7 +64,16 @@ func (s *VerifyBeaconKeyForEpochSuite) TestHappyPath() {
 	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(myBeaconKey, true, nil).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
+	require.NoError(s.T(), err)
+}
+
+// TestRequireKeyPresentFalse tests a scenario where:
+// - requireKeyPresent is false
+// Should return nil immediately without any verification.
+func (s *VerifyBeaconKeyForEpochSuite) TestRequireKeyPresentFalse() {
+	// No mocks should be called since we skip verification
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, false)
 	require.NoError(s.T(), err)
 }
 
@@ -74,7 +83,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestHappyPath() {
 func (s *VerifyBeaconKeyForEpochSuite) TestNodeNotDKGParticipant() {
 	s.dkg.On("KeyShare", s.nodeID).Return(nil, protocol.IdentityNotFoundError{NodeID: s.nodeID}).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.NoError(s.T(), err)
 }
 
@@ -89,7 +98,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestBeaconKeyNotFound() {
 	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(nil, false, storage.ErrNotFound).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.ErrorIs(s.T(), err, storage.ErrNotFound)
 	require.Contains(s.T(), err.Error(), "could not retrieve beacon key")
@@ -106,7 +115,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestBeaconKeyUnsafe() {
 	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(myBeaconKey, false, nil).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "marked unsafe")
 }
@@ -122,7 +131,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestBeaconKeyNil() {
 	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(nil, true, nil).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "is nil")
 }
@@ -139,7 +148,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestPublicKeyMismatch() {
 	s.dkg.On("KeyShare", s.nodeID).Return(differentPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(myBeaconKey, true, nil).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "does not match expected public key")
 }
@@ -160,7 +169,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestGetCurrentEpochError() {
 	finalSnapshot.On("Epochs").Return(epochs)
 	epochs.On("Current").Return(nil, exception).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, state, beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, state, beaconKeys, true)
 	require.Error(s.T(), err)
 	require.ErrorIs(s.T(), err, exception)
 }
@@ -174,7 +183,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestGetDKGError() {
 	s.currentEpoch.On("DKG").Unset()
 	s.currentEpoch.On("DKG").Return(nil, exception).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.ErrorIs(s.T(), err, exception)
 }
@@ -187,7 +196,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestGetKeyShareException() {
 
 	s.dkg.On("KeyShare", s.nodeID).Return(nil, exception).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.ErrorIs(s.T(), err, exception)
 }
@@ -204,7 +213,7 @@ func (s *VerifyBeaconKeyForEpochSuite) TestRetrieveKeyException() {
 	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
 	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(nil, false, exception).Once()
 
-	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys)
+	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, true)
 	require.Error(s.T(), err)
 	require.ErrorIs(s.T(), err, exception)
 }

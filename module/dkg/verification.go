@@ -1,6 +1,7 @@
 package dkg
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/rs/zerolog"
@@ -19,8 +20,10 @@ import (
 //   - nodeID: the node's identifier
 //   - protocolState: the protocol state to query epoch and DKG information
 //   - beaconKeys: storage for retrieving the beacon private key
+//   - requireKeyPresent: if false, verification is skipped and the function returns nil immediately
 //
 // Returns nil if:
+//   - requireKeyPresent is false (verification skipped), OR
 //   - the beacon key exists, is safe, and matches the expected public key, OR
 //   - the node is not a DKG participant for the current epoch (nothing to verify)
 //
@@ -34,6 +37,7 @@ func VerifyBeaconKeyForEpoch(
 	nodeID flow.Identifier,
 	protocolState protocol.State,
 	beaconKeys storage.SafeBeaconKeys,
+	requireKeyPresent bool,
 ) error {
 	// Get current epoch
 	currentEpoch, err := protocolState.Final().Epochs().Current()
@@ -62,11 +66,20 @@ func VerifyBeaconKeyForEpoch(
 	// Verify beacon key exists and is safe
 	key, safe, err := beaconKeys.RetrieveMyBeaconPrivateKey(epochCounter)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			if !requireKeyPresent {
+				log.Error().Uint64("epoch", epochCounter).
+					Msg("beacon key not found for current epoch, but --require-beacon-key flag is not set, skipping verification failure")
+				return nil
+			}
+		}
 		return fmt.Errorf("could not retrieve beacon key for epoch %d from secrets database - cannot participate in consensus: %w", epochCounter, err)
 	}
+
 	if !safe {
 		return fmt.Errorf("beacon key for epoch %d exists but is marked unsafe - cannot participate in consensus", epochCounter)
 	}
+
 	if key == nil {
 		return fmt.Errorf("beacon key for epoch %d is nil - cannot participate in consensus", epochCounter)
 	}

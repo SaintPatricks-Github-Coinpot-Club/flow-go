@@ -377,11 +377,7 @@ func main() {
 			return nil
 		}).
 		Module("beacon key verification", func(node *cmd.NodeConfig) error {
-			if !requireBeaconKeyOnStartup {
-				node.Logger.Info().Msg("beacon key verification on startup is disabled, skipping verification of beacon key for current epoch")
-				return nil
-			}
-			return dkgmodule.VerifyBeaconKeyForEpoch(node.Logger, node.NodeID, node.State, myBeaconKeyStateMachine)
+			return dkgmodule.VerifyBeaconKeyForEpoch(node.Logger, node.NodeID, node.State, myBeaconKeyStateMachine, requireBeaconKeyOnStartup)
 		}).
 		Module("collection guarantees mempool", func(node *cmd.NodeConfig) error {
 			guarantees = stdmap.NewGuarantees(guaranteeLimit)
