@@ -1476,7 +1476,9 @@ func (builder *ObserverServiceBuilder) BuildExecutionSyncComponents() *ObserverS
 				extendedIndexer, indexerDB, err := extended.BootstrapExtendedIndexes(
 					node.Logger,
 					utils.NotNil(builder.State),
-					utils.NotNil(builder.Storage.Blocks),
+					utils.NotNil(builder.Storage.Headers),
+					utils.NotNil(builder.Storage.Index),
+					utils.NotNil(builder.Storage.Guarantees),
 					utils.NotNil(builder.Storage.Collections),
 					utils.NotNil(builder.events),
 					utils.NotNil(builder.lightTransactionResults),

@@ -50,7 +50,9 @@ type ExtendedIndexer struct {
 
 	chainID           flow.ChainID
 	state             protocol.State
-	blocks            storage.Blocks
+	headers           storage.Headers
+	index             storage.Index
+	guarantees        storage.Guarantees
 	collections       storage.Collections
 	events            storage.Events
 	results           storage.LightTransactionResults
@@ -75,7 +77,9 @@ func NewExtendedIndexer(
 	db storage.DB,
 	lockManager storage.LockManager,
 	state protocol.State,
-	blocks storage.Blocks,
+	headers storage.Headers,
+	index storage.Index,
+	guarantees storage.Guarantees,
 	collections storage.Collections,
 	events storage.Events,
 	results storage.LightTransactionResults,
@@ -100,7 +104,9 @@ func NewExtendedIndexer(
 
 		chainID:           chainID,
 		state:             state,
-		blocks:            blocks,
+		headers:           headers,
+		index:             index,
+		guarantees:        guarantees,
 		collections:       collections,
 		events:            events,
 		results:           results,
@@ -170,15 +176,10 @@ func (c *ExtendedIndexer) IndexBlockData(
 		}
 	}
 
-	eventsByTxIndex := make(map[uint32][]flow.Event)
-	for _, event := range events {
-		eventsByTxIndex[event.TransactionIndex] = append(eventsByTxIndex[event.TransactionIndex], event)
-	}
-
 	c.latestBlockData = &BlockData{
 		Header:       header,
 		Transactions: transactions,
-		Events:       eventsByTxIndex,
+		Events:       groupEventsByTxIndex(events),
 	}
 	c.notifier.Notify()
 
@@ -309,12 +310,22 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 		return BlockData{}, fmt.Errorf("data for block %d not available yet: %w", height, storage.ErrNotFound)
 	}
 
-	block, err := c.blocks.ByHeight(height)
+	blockID, err := c.headers.BlockIDByHeight(height)
 	if err != nil {
-		return BlockData{}, fmt.Errorf("failed to get header by height: %w", err)
+		return BlockData{}, fmt.Errorf("failed to get block id by height: %w", err)
 	}
 
-	events, err := c.events.ByBlockID(block.ID())
+	header, err := c.headers.ByBlockID(blockID)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to get header by id: %w", err)
+	}
+
+	blockIndex, err := c.index.ByBlockID(blockID)
+	if err != nil {
+		return BlockData{}, fmt.Errorf("failed to get block index by block id: %w", err)
+	}
+
+	events, err := c.events.ByBlockID(blockID)
 	if err != nil {
 		return BlockData{}, fmt.Errorf("failed to get events by block id: %w", err)
 	}
@@ -325,23 +336,22 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 	// Note: we need to check both because it's possible the system transaction failed and did not
 	// produce any events.
 	if len(events) == 0 {
-		results, err := c.results.ByBlockID(block.ID())
+		results, err := c.results.ByBlockID(blockID)
 		if err != nil {
 			return BlockData{}, fmt.Errorf("failed to get results by block id: %w", err)
 		}
 
 		if len(results) == 0 {
-			return BlockData{}, fmt.Errorf("results for block %d not indexed yet: %w", block.Height, storage.ErrNotFound)
+			return BlockData{}, fmt.Errorf("results for block %d not indexed yet: %w", header.Height, storage.ErrNotFound)
 		}
 	}
 
-	eventsByTxIndex := make(map[uint32][]flow.Event)
-	for _, event := range events {
-		eventsByTxIndex[event.TransactionIndex] = append(eventsByTxIndex[event.TransactionIndex], event)
-	}
-
 	var transactions []*flow.TransactionBody
-	for _, guarantee := range block.Payload.Guarantees {
+	for _, guaranteeID := range blockIndex.GuaranteeIDs {
+		guarantee, err := c.guarantees.ByID(guaranteeID)
+		if err != nil {
+			return BlockData{}, fmt.Errorf("failed to get guarantee by id: %w", err)
+		}
 		collection, err := c.collections.ByID(guarantee.CollectionID)
 		if err != nil {
 			return BlockData{}, fmt.Errorf("failed to get collection by id: %w", err)
@@ -350,7 +360,7 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 	}
 
 	sysCollection, err := c.systemCollections.
-		ByHeight(block.Height).
+		ByHeight(header.Height).
 		SystemCollection(c.chainID.Chain(), access.StaticEventProvider(events))
 	if err != nil {
 		return BlockData{}, fmt.Errorf("could not construct system collection: %w", err)
@@ -358,9 +368,9 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 	transactions = append(transactions, sysCollection.Transactions...)
 
 	return BlockData{
-		Header:       block.ToHeader(),
+		Header:       header,
 		Transactions: transactions,
-		Events:       eventsByTxIndex,
+		Events:       groupEventsByTxIndex(events),
 	}, nil
 }
 
@@ -371,12 +381,9 @@ func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *exec
 	txs := make([]*flow.TransactionBody, 0)
 	events := make([]flow.Event, 0)
 	for i, chunk := range data.ChunkExecutionDatas {
-		if chunk.Collection != nil {
-			txs = append(txs, chunk.Collection.Transactions...)
-		} else {
-			// system collection
-			if i != len(data.ChunkExecutionDatas)-1 {
-				return nil, nil, fmt.Errorf("chunk collection is nil but not the last chunk")
+		if i == len(data.ChunkExecutionDatas)-1 {
+			if chunk.Collection != nil {
+				return nil, nil, fmt.Errorf("system chunk collection is not nil")
 			}
 			versionedCollection := systemcollection.Default(c.chainID)
 			systemCollection, err := versionedCollection.
@@ -386,7 +393,13 @@ func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *exec
 				return nil, nil, fmt.Errorf("could not get system collection: %w", err)
 			}
 			txs = append(txs, systemCollection.Transactions...)
+		} else {
+			if chunk.Collection == nil {
+				return nil, nil, fmt.Errorf("chunk collection is nil but not the last chunk")
+			}
+			txs = append(txs, chunk.Collection.Transactions...)
 		}
+
 		events = append(events, chunk.Events...)
 	}
 	return txs, events, nil
@@ -417,4 +430,13 @@ func buildGroupLookup(indexers []Indexer, latestBlockData *BlockData) ([]Indexer
 	}
 
 	return liveGroup, groupLookup, nil
+}
+
+// groupEventsByTxIndex returns a map of events grouped by transaction index in the original event order.
+func groupEventsByTxIndex(events []flow.Event) map[uint32][]flow.Event {
+	groups := make(map[uint32][]flow.Event)
+	for _, event := range events {
+		groups[event.TransactionIndex] = append(groups[event.TransactionIndex], event)
+	}
+	return groups
 }
