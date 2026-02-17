@@ -30,7 +30,6 @@ import (
 	"github.com/onflow/flow-go/fvm/evm/events"
 	"github.com/onflow/flow-go/fvm/evm/impl"
 	"github.com/onflow/flow-go/fvm/evm/stdlib"
-	"github.com/onflow/flow-go/fvm/evm/testutils"
 	. "github.com/onflow/flow-go/fvm/evm/testutils"
 	"github.com/onflow/flow-go/fvm/evm/types"
 	"github.com/onflow/flow-go/fvm/storage/snapshot"
@@ -3625,7 +3624,7 @@ func TestDryCallWithSignAndArgs(t *testing.T) {
 		require.NoError(t, output.Err)
 		require.Len(t, output.Events, 0)
 
-		result, err := testutils.ResultDecodedFromEVMResultValue(output.Value)
+		result, err := ResultDecodedFromEVMResultValue(output.Value)
 		require.NoError(t, err)
 		return result, execSnapshot
 	}

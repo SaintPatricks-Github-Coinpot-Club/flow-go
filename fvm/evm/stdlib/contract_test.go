@@ -29,7 +29,6 @@ import (
 	"github.com/onflow/flow-go/fvm/environment"
 	"github.com/onflow/flow-go/fvm/evm/impl"
 	"github.com/onflow/flow-go/fvm/evm/stdlib"
-	"github.com/onflow/flow-go/fvm/evm/testutils"
 	. "github.com/onflow/flow-go/fvm/evm/testutils"
 	"github.com/onflow/flow-go/fvm/evm/types"
 	"github.com/onflow/flow-go/fvm/meter"
@@ -4561,7 +4560,7 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -4746,7 +4745,7 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 1)
@@ -4807,7 +4806,7 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -4874,7 +4873,7 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -5396,7 +5395,7 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		val, err := executeScript(handler, script)
 		require.NoError(t, err)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -5584,7 +5583,7 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		val, err := executeScript(handler, script)
 		require.NoError(t, err)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 1)
@@ -5645,7 +5644,7 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		val, err := executeScript(handler, script)
 		require.NoError(t, err)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -5713,7 +5712,7 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		val, err := executeScript(handler, script)
 		require.NoError(t, err)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -5974,7 +5973,7 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -6183,7 +6182,7 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 1)
@@ -6251,7 +6250,7 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
 		assert.True(t, len(res.Results) == 0)
@@ -6326,7 +6325,7 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, dryCallCalled)
 
-		res, err := testutils.ResultDecodedFromEVMResultValue(val)
+		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
 		assert.True(t, len(res.Results) == 0)
