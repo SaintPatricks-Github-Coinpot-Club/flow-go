@@ -1655,7 +1655,6 @@ func (builder *ObserverServiceBuilder) BuildExecutionSyncComponents() *ObserverS
 					extendedIndexers,
 					node.RootChainID,
 					builder.extendedIndexingBackfillDelay,
-					executionDataStoreCache,
 				)
 				if err != nil {
 					return nil, fmt.Errorf("could not create extended indexer: %w", err)

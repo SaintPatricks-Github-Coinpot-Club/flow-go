@@ -22,7 +22,6 @@ import (
 	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module"
 	"github.com/onflow/flow-go/module/executiondatasync/execution_data"
-	executiondatamock "github.com/onflow/flow-go/module/executiondatasync/execution_data/mock"
 	"github.com/onflow/flow-go/module/executiondatasync/testutil"
 	"github.com/onflow/flow-go/module/irrecoverable"
 	"github.com/onflow/flow-go/module/mempool/stdmap"
@@ -414,7 +413,6 @@ func TestExecutionState_IndexBlockData(t *testing.T) {
 			[]extended.Indexer{stub},
 			test.indexer.chainID,
 			extended.DefaultBackfillDelay,
-			executiondatamock.NewExecutionDataCache(t),
 		)
 		require.NoError(t, err)
 
@@ -511,7 +509,6 @@ func TestExecutionState_IndexBlockData(t *testing.T) {
 			[]extended.Indexer{stub},
 			test.indexer.chainID,
 			extended.DefaultBackfillDelay,
-			executiondatamock.NewExecutionDataCache(t),
 		)
 		require.NoError(t, err)
 

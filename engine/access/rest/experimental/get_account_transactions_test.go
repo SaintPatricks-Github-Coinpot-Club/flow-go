@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	mocktestify "github.com/stretchr/testify/mock"
@@ -56,6 +57,7 @@ func TestGetAccountTransactions(t *testing.T) {
 				{
 					Address:          address,
 					BlockHeight:      1000,
+					BlockTimestamp:   1700000000000,
 					TransactionID:    txID1,
 					TransactionIndex: 3,
 					Roles:            []accessmodel.TransactionRole{accessmodel.TransactionRoleAuthorizer},
@@ -63,6 +65,7 @@ func TestGetAccountTransactions(t *testing.T) {
 				{
 					Address:          address,
 					BlockHeight:      999,
+					BlockTimestamp:   1699999000000,
 					TransactionID:    txID2,
 					TransactionIndex: 0,
 					Roles:            []accessmodel.TransactionRole{accessmodel.TransactionRoleInteracted},
@@ -92,24 +95,28 @@ func TestGetAccountTransactions(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rr.Code)
 
+		ts1 := time.UnixMilli(1700000000000).UTC().Format(time.RFC3339Nano)
+		ts2 := time.UnixMilli(1699999000000).UTC().Format(time.RFC3339Nano)
 		expectedCursorStr := testEncodeCursor(999, 0)
 		expected := fmt.Sprintf(`{
 			"transactions": [
 				{
 					"block_height": "1000",
+					"timestamp": "%s",
 					"transaction_id": "%s",
 					"transaction_index": "3",
 					"roles": ["authorizer"]
 				},
 				{
 					"block_height": "999",
+					"timestamp": "%s",
 					"transaction_id": "%s",
 					"transaction_index": "0",
 					"roles": ["interacted"]
 				}
 			],
 			"next_cursor": "%s"
-		}`, txID1.String(), txID2.String(), expectedCursorStr)
+		}`, ts1, txID1.String(), ts2, txID2.String(), expectedCursorStr)
 
 		assert.JSONEq(t, expected, rr.Body.String())
 	})
@@ -122,6 +129,7 @@ func TestGetAccountTransactions(t *testing.T) {
 				{
 					Address:          address,
 					BlockHeight:      500,
+					BlockTimestamp:   1698000000000,
 					TransactionID:    txID1,
 					TransactionIndex: 1,
 					Roles:            []accessmodel.TransactionRole{accessmodel.TransactionRoleAuthorizer},
@@ -148,16 +156,18 @@ func TestGetAccountTransactions(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rr.Code)
 
+		ts := time.UnixMilli(1698000000000).UTC().Format(time.RFC3339Nano)
 		expected := fmt.Sprintf(`{
 			"transactions": [
 				{
 					"block_height": "500",
+					"timestamp": "%s",
 					"transaction_id": "%s",
 					"transaction_index": "1",
 					"roles": ["authorizer"]
 				}
 			]
-		}`, txID1.String())
+		}`, ts, txID1.String())
 
 		assert.JSONEq(t, expected, rr.Body.String())
 	})

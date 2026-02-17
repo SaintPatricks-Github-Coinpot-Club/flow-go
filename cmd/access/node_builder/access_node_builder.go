@@ -1118,7 +1118,6 @@ func (builder *FlowAccessNodeBuilder) BuildExecutionSyncComponents() *FlowAccess
 					extendedIndexers,
 					node.RootChainID,
 					builder.extendedIndexingBackfillDelay,
-					utils.NotNil(builder.ExecutionDataCache),
 				)
 				if err != nil {
 					return nil, fmt.Errorf("could not create extended indexer: %w", err)

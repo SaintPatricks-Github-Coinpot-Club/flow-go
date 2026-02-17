@@ -128,14 +128,10 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 		}
 	}
 
-	if !expandResults {
-		return &page, nil
-	}
-
 	// enrich the transactions with additional details requested by the client
 	// Note: if no transactions are found, the response will include an empty array and no error.
 	for i := range page.Transactions {
-		err := b.enrichTransaction(ctx, &page.Transactions[i], encodingVersion)
+		err := b.enrichTransaction(ctx, &page.Transactions[i], expandResults, encodingVersion)
 		if err != nil {
 			// all errors are internal since data should exist in storage
 			return nil, status.Errorf(codes.Internal, "failed populate details for transaction %s: %v", page.Transactions[i].TransactionID, err)
@@ -145,7 +141,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 	return &page, nil
 }
 
-// enrichTransaction adds additional details to the transaction to the transaction.
+// enrichTransaction adds additional details to the transaction.
 //
 // Since the extended indexer only indexes sealed data, all transaction and result data should exist
 // in storage for the given height.
@@ -154,6 +150,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 func (b *AccountTransactionsBackend) enrichTransaction(
 	ctx context.Context,
 	tx *accessmodel.AccountTransaction,
+	expandResults bool,
 	encodingVersion entities.EventEncodingVersion,
 ) error {
 	blockID, err := b.headers.BlockIDByHeight(tx.BlockHeight)
@@ -164,6 +161,14 @@ func (b *AccountTransactionsBackend) enrichTransaction(
 	header, err := b.headers.ByBlockID(blockID)
 	if err != nil {
 		return fmt.Errorf("could not retrieve block header: %w", err)
+	}
+
+	// always add the block timestamp
+	tx.BlockTimestamp = header.Timestamp
+
+	// only add the transaction body and result if requested
+	if !expandResults {
+		return nil
 	}
 
 	txBody, isSystemChunkTx, err := b.getTransactionBody(ctx, header, tx.TransactionID)

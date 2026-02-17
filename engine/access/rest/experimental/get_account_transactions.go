@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/onflow/flow/protobuf/go/flow/entities"
 
@@ -25,6 +26,7 @@ type AccountTransactionsResponse struct {
 // AccountTransactionResponse is a single transaction entry in the response.
 type AccountTransactionResponse struct {
 	BlockHeight      string                          `json:"block_height"`
+	BlockTimestamp   string                          `json:"timestamp"`
 	TransactionID    string                          `json:"transaction_id"`
 	TransactionIndex string                          `json:"transaction_index"`
 	Roles            []string                        `json:"roles,omitempty"`
@@ -100,6 +102,7 @@ func GetAccountTransactions(r *common.Request, backend extended.API, link common
 		}
 		resp.Transactions[i] = AccountTransactionResponse{
 			BlockHeight:      strconv.FormatUint(tx.BlockHeight, 10),
+			BlockTimestamp:   time.UnixMilli(int64(tx.BlockTimestamp)).UTC().Format(time.RFC3339Nano),
 			TransactionID:    tx.TransactionID.String(),
 			TransactionIndex: strconv.FormatUint(uint64(tx.TransactionIndex), 10),
 			Roles:            roles,
