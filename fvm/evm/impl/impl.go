@@ -1577,6 +1577,10 @@ func encodeABIWithSigAndArgs(
 		return nil, err
 	}
 
+	if len(sig) < 4 {
+		return nil, errors.NewUnreachableError()
+	}
+
 	sig = sig[:4]
 
 	if args.Count() == 0 {
