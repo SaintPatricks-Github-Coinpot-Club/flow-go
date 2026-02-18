@@ -374,32 +374,17 @@ func (c *ExtendedIndexer) blockDataFromStorage(height uint64, latestBlockData *B
 	}, nil
 }
 
+// extractDataFromExecutionData extracts the transaction and event data from the execution data.
+//
+// No error returns are expected during normal operation.
 func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *execution_data.BlockExecutionDataEntity) ([]*flow.TransactionBody, []flow.Event, error) {
-	// NOTE: FVM assigns TransactionIndex globally across the whole block (all user txs in
-	// collection order, then system/scheduled txs). Flattening chunks in order keeps txIndex
-	// alignment with events.
 	txs := make([]*flow.TransactionBody, 0)
 	events := make([]flow.Event, 0)
 	for i, chunk := range data.ChunkExecutionDatas {
-		if i == len(data.ChunkExecutionDatas)-1 {
-			if chunk.Collection != nil {
-				return nil, nil, fmt.Errorf("system chunk collection is not nil")
-			}
-			versionedCollection := systemcollection.Default(c.chainID)
-			systemCollection, err := versionedCollection.
-				ByHeight(height).
-				SystemCollection(c.chainID.Chain(), access.StaticEventProvider(chunk.Events))
-			if err != nil {
-				return nil, nil, fmt.Errorf("could not get system collection: %w", err)
-			}
-			txs = append(txs, systemCollection.Transactions...)
-		} else {
-			if chunk.Collection == nil {
-				return nil, nil, fmt.Errorf("chunk collection is nil but not the last chunk")
-			}
-			txs = append(txs, chunk.Collection.Transactions...)
+		if chunk.Collection == nil {
+			return nil, nil, fmt.Errorf("chunk %d collection is nil", i)
 		}
-
+		txs = append(txs, chunk.Collection.Transactions...)
 		events = append(events, chunk.Events...)
 	}
 	return txs, events, nil

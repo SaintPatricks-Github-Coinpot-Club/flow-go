@@ -193,7 +193,7 @@ func (s *ExtendedIndexerSuite) assertBackfilledBlockData(m *mockIndexer, fixture
 }
 
 // assertLiveBlockData verifies that the received BlockData for a live block matches
-// the expected fixture data: exactly the user transactions (no system collection), and all
+// the expected fixture data: user transactions followed by system transactions, and all
 // events grouped by tx index.
 func (s *ExtendedIndexerSuite) assertLiveBlockData(m *mockIndexer, fixture *blockFixtures) {
 	s.T().Helper()
@@ -202,7 +202,7 @@ func (s *ExtendedIndexerSuite) assertLiveBlockData(m *mockIndexer, fixture *bloc
 
 	assert.Equal(s.T(), fixture.Header, data.Header)
 
-	// Live data has exactly the user transactions (no system collection added).
+	// Live data contains user transactions followed by system transactions.
 	expectedTxs := fixture.allTransactions()
 
 	require.Len(s.T(), data.Transactions, len(expectedTxs), "transaction count mismatch at height %d", fixture.Header.Height)
