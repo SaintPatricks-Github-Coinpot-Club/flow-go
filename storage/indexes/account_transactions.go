@@ -249,9 +249,8 @@ func lookupAccountTransactions(
 
 			// Skip entries at or before the cursor position (it was the last item of the previous page).
 			if skipFirst {
-				if height > cursor.BlockHeight {
-					return false, nil
-				}
+				// no need to check height > cursor.BlockHeight since the iterator bounds already
+				// omit heights outside of the range.
 				if height == cursor.BlockHeight && txIndex <= cursor.TransactionIndex {
 					return false, nil
 				}

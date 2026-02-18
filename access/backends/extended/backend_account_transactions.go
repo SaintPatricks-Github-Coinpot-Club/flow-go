@@ -68,7 +68,6 @@ type AccountTransactionsBackend struct {
 func NewAccountTransactionsBackend(
 	log zerolog.Logger,
 	config Config,
-	chainID flow.ChainID,
 	store storage.AccountTransactionsReader,
 	headers storage.Headers,
 	collections storage.CollectionsReader,
@@ -134,7 +133,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 		err := b.enrichTransaction(ctx, &page.Transactions[i], expandResults, encodingVersion)
 		if err != nil {
 			// all errors are internal since data should exist in storage
-			return nil, status.Errorf(codes.Internal, "failed populate details for transaction %s: %v", page.Transactions[i].TransactionID, err)
+			return nil, status.Errorf(codes.Internal, "failed to populate details for transaction %s: %v", page.Transactions[i].TransactionID, err)
 		}
 	}
 
@@ -202,6 +201,20 @@ func (b *AccountTransactionsBackend) enrichTransaction(
 	return nil
 }
 
+// getTransactionBody retrieves the transaction body for the given txID by searching in order:
+// submitted transactions, system transactions, and finally scheduled transactions.
+// The second return value indicates whether the transaction is a system transaction
+// (system chunk or scheduled execution).
+//
+// If the transaction is a scheduled transaction, the block ID stored for it must match the
+// provided header. A mismatch indicates an inconsistency in the node's storage, which is
+// treated as an irrecoverable exception.
+//
+// Similarly, if the transaction was indexed for an account but cannot be found in any storage
+// location, the node's state is inconsistent, which is also treated as an irrecoverable
+// exception.
+//
+// No error returns are expected during normal operation.
 func (b *AccountTransactionsBackend) getTransactionBody(ctx context.Context, header *flow.Header, txID flow.Identifier) (*flow.TransactionBody, bool, error) {
 	// first, check if it's a submitted transaction since that's the most common
 	txBody, err := b.transactions.ByID(txID)

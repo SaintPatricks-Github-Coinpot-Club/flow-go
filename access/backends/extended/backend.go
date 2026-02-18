@@ -79,7 +79,6 @@ func New(
 		AccountTransactionsBackend: NewAccountTransactionsBackend(
 			log,
 			config,
-			chainID,
 			store,
 			headers,
 			collections,
