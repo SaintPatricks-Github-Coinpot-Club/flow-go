@@ -13,7 +13,8 @@ import (
 
 // VerifyBeaconKeyForEpoch verifies that the beacon private key for the current epoch exists,
 // is safe to use, and matches the expected public key from the protocol state.
-// This function is intended to be called at node startup when the --require-beacon-key flag is set.
+// This function is intended to be called at node startup. When the --require-beacon-key flag is set,
+// this function returns an error (and should crash the node). Otherwise, logs a warning and returns nil.
 //
 // Parameters:
 //   - log: logger for outputting verification status
@@ -40,6 +41,7 @@ func VerifyBeaconKeyForEpoch(
 	beaconKeys storage.SafeBeaconKeys,
 	requireKeyPresent bool,
 ) error {
+	log = log.With().Str("component", "startup_beacon_key_verifier").Logger()
 	// Get current epoch
 	currentEpoch, err := protocolState.Final().Epochs().Current()
 	if err != nil {
@@ -69,7 +71,7 @@ func VerifyBeaconKeyForEpoch(
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			if !requireKeyPresent {
-				log.Error().Uint64("epoch", epochCounter).
+				log.Warn().Uint64("epoch", epochCounter).
 					Msg("beacon key not found for current epoch, but --require-beacon-key flag is not set, skipping verification failure")
 				return nil
 			}
