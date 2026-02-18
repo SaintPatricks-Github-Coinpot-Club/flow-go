@@ -14,6 +14,7 @@ import (
 	"github.com/onflow/flow/protobuf/go/flow/entities"
 
 	accessmodel "github.com/onflow/flow-go/model/access"
+	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/irrecoverable"
 	"github.com/onflow/flow-go/storage"
 	storagemock "github.com/onflow/flow-go/storage/mock"
@@ -27,16 +28,18 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 
 	t.Run("happy path returns page from storage", func(t *testing.T) {
 		mockStore := storagemock.NewAccountTransactionsReader(t)
-		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, nil, nil, nil, nil, nil, nil)
+		mockHeaders := storagemock.NewHeaders(t)
+		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, mockHeaders, nil, nil, nil, nil, nil)
 
 		addr := unittest.RandomAddressFixture()
 		txID := unittest.IdentifierFixture()
+		blockHeader := unittest.BlockHeaderFixture()
 
 		expectedPage := accessmodel.AccountTransactionsPage{
 			Transactions: []accessmodel.AccountTransaction{
 				{
 					Address:          addr,
-					BlockHeight:      100,
+					BlockHeight:      blockHeader.Height,
 					TransactionID:    txID,
 					TransactionIndex: 0,
 					Roles:            []accessmodel.TransactionRole{accessmodel.TransactionRoleAuthorizer},
@@ -48,23 +51,28 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockStore.On("TransactionsByAddress",
 			addr, uint32(50), (*accessmodel.AccountTransactionCursor)(nil), mocktestify.Anything,
 		).Return(expectedPage, nil)
+		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
+		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
 		page, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
 		require.NoError(t, err)
 		require.Len(t, page.Transactions, 1)
 		assert.Equal(t, txID, page.Transactions[0].TransactionID)
+		assert.Equal(t, blockHeader.Timestamp, page.Transactions[0].BlockTimestamp)
 		assert.Nil(t, page.NextCursor)
 	})
 
 	t.Run("default limit applied when limit is 0", func(t *testing.T) {
 		mockStore := storagemock.NewAccountTransactionsReader(t)
-		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, nil, nil, nil, nil, nil, nil)
+		mockHeaders := storagemock.NewHeaders(t)
+		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, mockHeaders, nil, nil, nil, nil, nil)
 
 		addr := unittest.RandomAddressFixture()
+		blockHeader := unittest.BlockHeaderFixture()
 
 		nonEmptyPage := accessmodel.AccountTransactionsPage{
 			Transactions: []accessmodel.AccountTransaction{
-				{Address: addr, BlockHeight: 1, TransactionID: unittest.IdentifierFixture()},
+				{Address: addr, BlockHeight: blockHeader.Height, TransactionID: unittest.IdentifierFixture()},
 			},
 		}
 
@@ -72,6 +80,8 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockStore.On("TransactionsByAddress",
 			addr, uint32(50), (*accessmodel.AccountTransactionCursor)(nil), mocktestify.Anything,
 		).Return(nonEmptyPage, nil)
+		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
+		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
 		_, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
 		require.NoError(t, err)
@@ -79,13 +89,15 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 
 	t.Run("max limit cap applied", func(t *testing.T) {
 		mockStore := storagemock.NewAccountTransactionsReader(t)
-		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, nil, nil, nil, nil, nil, nil)
+		mockHeaders := storagemock.NewHeaders(t)
+		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, mockHeaders, nil, nil, nil, nil, nil)
 
 		addr := unittest.RandomAddressFixture()
+		blockHeader := unittest.BlockHeaderFixture()
 
 		nonEmptyPage := accessmodel.AccountTransactionsPage{
 			Transactions: []accessmodel.AccountTransaction{
-				{Address: addr, BlockHeight: 1, TransactionID: unittest.IdentifierFixture()},
+				{Address: addr, BlockHeight: blockHeader.Height, TransactionID: unittest.IdentifierFixture()},
 			},
 		}
 
@@ -93,6 +105,8 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockStore.On("TransactionsByAddress",
 			addr, uint32(200), (*accessmodel.AccountTransactionCursor)(nil), mocktestify.Anything,
 		).Return(nonEmptyPage, nil)
+		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
+		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
 		_, err := backend.GetAccountTransactions(context.Background(), addr, 500, nil, AccountTransactionFilter{}, false, defaultEncoding)
 		require.NoError(t, err)
@@ -100,10 +114,12 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 
 	t.Run("cursor is forwarded to storage", func(t *testing.T) {
 		mockStore := storagemock.NewAccountTransactionsReader(t)
-		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, nil, nil, nil, nil, nil, nil)
+		mockHeaders := storagemock.NewHeaders(t)
+		backend := NewAccountTransactionsBackend(unittest.Logger(), DefaultConfig(), "", mockStore, mockHeaders, nil, nil, nil, nil, nil)
 
 		addr := unittest.RandomAddressFixture()
 		cursor := &accessmodel.AccountTransactionCursor{BlockHeight: 50, TransactionIndex: 3}
+		blockHeader := unittest.BlockHeaderFixture(func(h *flow.Header) { h.Height = 50 })
 
 		nonEmptyPage := accessmodel.AccountTransactionsPage{
 			Transactions: []accessmodel.AccountTransaction{
@@ -114,6 +130,8 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockStore.On("TransactionsByAddress",
 			addr, uint32(10), cursor, mocktestify.Anything,
 		).Return(nonEmptyPage, nil)
+		mockHeaders.On("BlockIDByHeight", uint64(50)).Return(blockHeader.ID(), nil)
+		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
 		_, err := backend.GetAccountTransactions(context.Background(), addr, 10, cursor, AccountTransactionFilter{}, false, defaultEncoding)
 		require.NoError(t, err)

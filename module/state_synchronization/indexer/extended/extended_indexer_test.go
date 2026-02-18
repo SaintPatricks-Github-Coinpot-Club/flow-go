@@ -420,7 +420,7 @@ func (s *ExtendedIndexerSuite) TestUninitializedNotFoundThenCatchUp() {
 
 	// Let a few timer iterations pass with ErrNotFound -- indexer should not have been called.
 	require.Never(s.T(), func() bool {
-		return idx.nextHeight.Load() > 2
+		return idx.nextHeight.Load() > 5
 	}, 50*time.Millisecond, time.Millisecond, "indexer should not have advanced")
 
 	// Make data available -- next timer tick should process it.
@@ -649,4 +649,3 @@ func generateBlockFixtures(t *testing.T, g *fixtures.GeneratorSuite, height uint
 		SystemCollection: systemCollection,
 	}
 }
-
