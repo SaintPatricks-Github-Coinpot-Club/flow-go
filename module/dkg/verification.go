@@ -27,6 +27,7 @@ import (
 //   - the beacon key exists, is safe, and matches the expected public key, OR
 //   - the node is not a DKG participant for the current epoch (nothing to verify)
 //
+// This is a binary validation function and all errors indicate that validation failed, which should be interpreted by the upper layer as an exception.
 // Returns an error if:
 //   - the beacon key is missing from storage
 //   - the beacon key exists but is marked unsafe
