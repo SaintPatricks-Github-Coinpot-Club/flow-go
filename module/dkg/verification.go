@@ -79,6 +79,12 @@ func VerifyBeaconKeyForEpoch(
 		return fmt.Errorf("could not retrieve beacon key for epoch %d from secrets database - cannot participate in consensus: %w", epochCounter, err)
 	}
 
+	if !requireKeyPresent {
+		log.Warn().Uint64("epoch", epochCounter).
+			Msg("beacon key verification failed for current epoch, but --require-beacon-key flag is not set, skipping verification failure")
+		return nil
+	}
+
 	if !safe {
 		return fmt.Errorf("beacon key for epoch %d exists but is marked unsafe - cannot participate in consensus", epochCounter)
 	}
