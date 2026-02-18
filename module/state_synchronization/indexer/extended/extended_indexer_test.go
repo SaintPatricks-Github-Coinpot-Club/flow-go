@@ -307,14 +307,20 @@ func (s *ExtendedIndexerSuite) TestSplitLiveAndBackfill() {
 	s.newExtendedIndexer(newMockState(s.T()), []extended.Indexer{liveIdx, backfillIdx}, time.Millisecond)
 	s.startComponent()
 
-	s.provideBlock(liveHeight)
+	// Use provideLiveBlock so both the live and backfill paths use the same block header and data.
+	// This allows asserting height liveHeight for all indexers regardless of which path was used.
+	s.provideLiveBlock(blocks[liveHeight])
 
 	unittest.RequireCloseBefore(s.T(), liveIdx.done, testTimeout, "timeout waiting for live indexer")
 	unittest.RequireCloseBefore(s.T(), backfillIdx.done, testTimeout, "timeout waiting for backfill indexer")
 
-	// Verify backfilled data for heights before liveHeight.
-	// Height liveHeight may come from either storage or the live block depending on timing.
-	for h := uint64(3); h < liveHeight; h++ {
+	// Verify the live indexer received the correct data at liveHeight.
+	s.assertLiveBlockData(liveIdx, blocks[liveHeight])
+
+	// Verify backfilled data for all heights, including liveHeight.
+	// backfillIdx may process liveHeight via either the live or storage path, but both
+	// produce the same data since provideLiveBlock provides allTransactions().
+	for h := uint64(3); h <= liveHeight; h++ {
 		s.assertBackfilledBlockData(backfillIdx, blocks[h])
 	}
 }
@@ -337,8 +343,11 @@ func (s *ExtendedIndexerSuite) TestCatchUpAndContinueLive() {
 	s.newExtendedIndexer(newMockState(s.T()), []extended.Indexer{idx}, time.Millisecond)
 	s.startComponent()
 
-	// Give backfill some time to make progress from storage.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the indexer has processed at least one block from storage before providing
+	// the live block, ensuring the "catch up" path is exercised.
+	require.Eventually(s.T(), func() bool {
+		return idx.nextHeight.Load() > 2
+	}, testTimeout, time.Millisecond, "indexer should have made backfill progress from storage")
 
 	// Provide a live block -- the indexer should process it after catching up.
 	s.provideBlock(liveHeight + 1)
@@ -386,20 +395,12 @@ func (s *ExtendedIndexerSuite) TestUninitializedNotFoundThenCatchUp() {
 	available := atomic.NewBool(false)
 	s.headers.
 		On("BlockIDByHeight", uint64(5)).
-		Return(
-			func(uint64) flow.Identifier {
-				if !available.Load() {
-					return flow.ZeroID
-				}
-				return blockID
-			},
-			func(uint64) error {
-				if !available.Load() {
-					return storage.ErrNotFound
-				}
-				return nil
-			},
-		)
+		Return(func(uint64) (flow.Identifier, error) {
+			if !available.Load() {
+				return flow.ZeroID, storage.ErrNotFound
+			}
+			return blockID, nil
+		})
 
 	// Remaining storage mocks use exact fixture data (only called after available=true).
 	s.headers.On("ByBlockID", blockID).Return(block.Header, nil)
@@ -418,8 +419,9 @@ func (s *ExtendedIndexerSuite) TestUninitializedNotFoundThenCatchUp() {
 	s.startComponent()
 
 	// Let a few timer iterations pass with ErrNotFound -- indexer should not have been called.
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(s.T(), uint64(5), idx.nextHeight.Load(), "indexer should not have advanced")
+	require.Never(s.T(), func() bool {
+		return idx.nextHeight.Load() > 2
+	}, 50*time.Millisecond, time.Millisecond, "indexer should not have advanced")
 
 	// Make data available -- next timer tick should process it.
 	available.Store(true)
