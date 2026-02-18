@@ -70,9 +70,16 @@ func (s *VerifyBeaconKeyForEpochSuite) TestHappyPath() {
 
 // TestRequireKeyPresentFalse tests a scenario where:
 // - requireKeyPresent is false
-// Should return nil immediately without any verification.
+// - node is a DKG participant
+// - beacon key is not found in storage
+// Should return nil (not fail) because requireKeyPresent is false.
 func (s *VerifyBeaconKeyForEpochSuite) TestRequireKeyPresentFalse() {
-	// No mocks should be called since we skip verification
+	myBeaconKey := unittest.PrivateKeyFixture(crypto.BLSBLS12381)
+	expectedPubKey := myBeaconKey.PublicKey()
+
+	s.dkg.On("KeyShare", s.nodeID).Return(expectedPubKey, nil).Once()
+	s.beaconKeys.On("RetrieveMyBeaconPrivateKey", s.epochCounter).Return(nil, false, storage.ErrNotFound).Once()
+
 	err := VerifyBeaconKeyForEpoch(unittest.Logger(), s.nodeID, s.state, s.beaconKeys, false)
 	require.NoError(s.T(), err)
 }
