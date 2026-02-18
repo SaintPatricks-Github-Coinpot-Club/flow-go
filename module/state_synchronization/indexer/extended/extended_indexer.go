@@ -386,12 +386,9 @@ func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *exec
 	txs := make([]*flow.TransactionBody, 0)
 	events := make([]flow.Event, 0)
 	for i, chunk := range data.ChunkExecutionDatas {
-		if chunk.Collection != nil {
-			txs = append(txs, chunk.Collection.Transactions...)
-		} else {
-			// system collection
-			if i != len(data.ChunkExecutionDatas)-1 {
-				return nil, nil, fmt.Errorf("chunk collection is nil but not the last chunk")
+		if i == len(data.ChunkExecutionDatas)-1 {
+			if chunk.Collection != nil {
+				return nil, nil, fmt.Errorf("system chunk collection is not nil")
 			}
 
 			systemCollection, err := c.systemCollections.
@@ -401,7 +398,13 @@ func (c *ExtendedIndexer) extractDataFromExecutionData(height uint64, data *exec
 				return nil, nil, fmt.Errorf("could not get system collection: %w", err)
 			}
 			txs = append(txs, systemCollection.Transactions...)
+		} else {
+			if chunk.Collection == nil {
+				return nil, nil, fmt.Errorf("chunk collection is nil but not the last chunk")
+			}
+			txs = append(txs, chunk.Collection.Transactions...)
 		}
+
 		events = append(events, chunk.Events...)
 	}
 	return txs, events, nil
