@@ -3561,7 +3561,7 @@ func TestDryCall(t *testing.T) {
 	})
 }
 
-func TestDryCallWithSignAndArgs(t *testing.T) {
+func TestDryCallWithSigAndArgs(t *testing.T) {
 	t.Parallel()
 
 	chain := flow.Emulator.Chain()
@@ -3661,6 +3661,7 @@ func TestDryCallWithSignAndArgs(t *testing.T) {
 				require.Equal(t, types.StatusSuccessful, result.Status)
 				require.Greater(t, result.GasConsumed, uint64(0))
 				require.Less(t, result.GasConsumed, limit)
+				require.True(t, len(result.Results) == 0)
 
 				// gas limit too low, but still bigger than intrinsic gas value
 				limit = uint64(24_216)
@@ -3679,6 +3680,7 @@ func TestDryCallWithSignAndArgs(t *testing.T) {
 				require.Equal(t, types.ExecutionErrCodeOutOfGas, result.ErrorCode)
 				require.Equal(t, types.StatusFailed, result.Status)
 				require.Equal(t, result.GasConsumed, limit)
+				require.True(t, len(result.Results) == 0)
 
 				// EVM.dryCall must not be limited to `gethParams.MaxTxGas`
 				limit = gethParams.MaxTxGas + 1_000
@@ -3698,6 +3700,7 @@ func TestDryCallWithSignAndArgs(t *testing.T) {
 				require.Equal(t, types.StatusSuccessful, result.Status)
 				require.Greater(t, result.GasConsumed, uint64(0))
 				require.Less(t, result.GasConsumed, limit)
+				require.True(t, len(result.Results) == 0)
 			})
 	})
 

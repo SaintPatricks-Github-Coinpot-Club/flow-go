@@ -1285,19 +1285,15 @@ func decodeResultData(
 	evmSpecialTypeIDs *evmSpecialTypeIDs,
 	resultTypes *interpreter.ArrayValue,
 	result *types.ResultSummary,
-) (interpreter.OptionalValue, error) {
-
-	results := interpreter.NilOptionalValue
+) (interpreter.Value, error) {
 
 	if result.Status != types.StatusSuccessful || resultTypes == nil || resultTypes.Count() == 0 {
-		return results, nil
+		resultValue := interpreter.ByteSliceToByteArrayValue(context, result.ReturnedData)
+		return resultValue, nil
 	}
 
 	resultValue := decodeABIs(context, location, evmSpecialTypeIDs, resultTypes, result.ReturnedData)
-
-	results = interpreter.NewSomeValueNonCopying(context, resultValue)
-
-	return results, nil
+	return resultValue, nil
 }
 
 func ResultSummaryFromEVMResultValue(val cadence.Value) (*types.ResultSummary, error) {

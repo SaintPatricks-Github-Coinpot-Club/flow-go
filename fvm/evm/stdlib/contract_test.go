@@ -4438,7 +4438,7 @@ func TestEVMDryCall(t *testing.T) {
 	assert.True(t, dryCallCalled)
 }
 
-func TestEVMDryCallWithArgs(t *testing.T) {
+func TestEVMDryCallWithSigAndArgs(t *testing.T) {
 
 	t.Parallel()
 
@@ -4535,7 +4535,8 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 				assert.Equal(t, big.NewInt(150), gethTx.Value())
 
 				return &types.ResultSummary{
-					Status: types.StatusFailed,
+					Status:       types.StatusFailed,
+					ReturnedData: types.Data([]byte{0, 1, 2}),
 				}
 			},
 		}
@@ -4563,7 +4564,10 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("dryCall includes result types, tx result data is empty", func(t *testing.T) {
@@ -4781,7 +4785,8 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 				assert.Equal(t, big.NewInt(150), gethTx.Value())
 
 				return &types.ResultSummary{
-					Status: types.StatusFailed,
+					Status:       types.StatusFailed,
+					ReturnedData: types.Data([]byte{0, 1, 2}),
 				}
 			},
 		}
@@ -4809,7 +4814,10 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("dryCall doesn't include result types, tx is successful", func(t *testing.T) {
@@ -4876,7 +4884,14 @@ func TestEVMDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 32)
+		for i, v := range res.Results {
+			if i == len(res.Results)-1 {
+				assert.Equal(t, cadence.UInt8(1), v)
+			} else {
+				assert.Equal(t, cadence.UInt8(0), v)
+			}
+		}
 	})
 }
 
@@ -5271,7 +5286,7 @@ func TestCadenceOwnedAccountCall(t *testing.T) {
 	require.Equal(t, expected, actual)
 }
 
-func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
+func TestCadenceOwnedAccountCallWithSigAndArgs(t *testing.T) {
 
 	t.Parallel()
 
@@ -5362,7 +5377,8 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 						assert.Equal(t, types.NewBalanceFromUFix64(expectedBalance), balance)
 
 						return &types.ResultSummary{
-							Status: types.StatusFailed,
+							Status:       types.StatusFailed,
+							ReturnedData: types.Data([]byte{0, 1, 2}),
 						}
 					},
 				}
@@ -5398,7 +5414,10 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("call includes result types, tx result data is empty", func(t *testing.T) {
@@ -5611,7 +5630,8 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 						assert.Equal(t, types.NewBalanceFromUFix64(expectedBalance), balance)
 
 						return &types.ResultSummary{
-							Status: types.StatusFailed,
+							Status:       types.StatusFailed,
+							ReturnedData: types.Data([]byte{0, 1, 2}),
 						}
 					},
 				}
@@ -5647,7 +5667,10 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("call doesn't result types, tx is successful", func(t *testing.T) {
@@ -5715,7 +5738,14 @@ func TestCadenceOwnedAccountCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 32)
+		for i, v := range res.Results {
+			if i == len(res.Results)-1 {
+				assert.Equal(t, cadence.UInt8(1), v)
+			} else {
+				assert.Equal(t, cadence.UInt8(0), v)
+			}
+		}
 	})
 }
 
@@ -5846,7 +5876,7 @@ func TestCadenceOwnedAccountDryCall(t *testing.T) {
 	require.True(t, dryCallCalled)
 }
 
-func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
+func TestCadenceOwnedAccountDryCallWithSigAndArgs(t *testing.T) {
 
 	t.Parallel()
 
@@ -5939,7 +5969,8 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 				assert.Equal(t, big.NewInt(1230000000000000000), gethTx.Value())
 
 				return &types.ResultSummary{
-					Status: types.StatusFailed,
+					Status:       types.StatusFailed,
+					ReturnedData: types.Data([]byte{0, 1, 2}),
 				}
 			},
 		}
@@ -5976,7 +6007,10 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("dryCall includes result types, tx result data is empty", func(t *testing.T) {
@@ -6216,7 +6250,8 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 				assert.Equal(t, big.NewInt(1230000000000000000), gethTx.Value())
 
 				return &types.ResultSummary{
-					Status: types.StatusFailed,
+					Status:       types.StatusFailed,
+					ReturnedData: types.Data([]byte{0, 1, 2}),
 				}
 			},
 		}
@@ -6253,7 +6288,10 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusFailed, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 3)
+		assert.Equal(t, cadence.UInt8(0), res.Results[0])
+		assert.Equal(t, cadence.UInt8(1), res.Results[1])
+		assert.Equal(t, cadence.UInt8(2), res.Results[2])
 	})
 
 	t.Run("dryCall doesn't result types, tx is successful", func(t *testing.T) {
@@ -6328,7 +6366,14 @@ func TestCadenceOwnedAccountDryCallWithArgs(t *testing.T) {
 		res, err := ResultDecodedFromEVMResultValue(val)
 		require.NoError(t, err)
 		assert.Equal(t, types.StatusSuccessful, res.Status)
-		assert.True(t, len(res.Results) == 0)
+		assert.True(t, len(res.Results) == 32)
+		for i, v := range res.Results {
+			if i == len(res.Results)-1 {
+				assert.Equal(t, cadence.UInt8(1), v)
+			} else {
+				assert.Equal(t, cadence.UInt8(0), v)
+			}
+		}
 	})
 }
 

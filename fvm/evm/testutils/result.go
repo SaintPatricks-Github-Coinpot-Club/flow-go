@@ -61,19 +61,12 @@ func ResultDecodedFromEVMResultValue(val cadence.Value) (*ResultDecoded, error) 
 		return nil, fmt.Errorf("invalid input: unexpected type for gas field")
 	}
 
-	resultsField, ok := fields[stdlib.EVMResultTypeResultsFieldName].(cadence.Optional)
+	resultsField, ok := fields[stdlib.EVMResultTypeResultsFieldName].(cadence.Array)
 	if !ok {
 		return nil, fmt.Errorf("invalid input: unexpected type for data field")
 	}
 
-	var results []cadence.Value
-	if resultsField.Value != nil {
-		resultArray, ok := resultsField.Value.(cadence.Array)
-		if !ok {
-			return nil, fmt.Errorf("invalid input: unexpected type for results field")
-		}
-		results = resultArray.Values
-	}
+	results := resultsField.Values
 
 	var convertedDeployedAddress *types.Address
 

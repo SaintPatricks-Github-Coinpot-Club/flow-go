@@ -418,10 +418,10 @@ access(all) contract EVM {
         /// evm execution
         access(all) let gasUsed: UInt64
 
-        /// Returns the decoded results from the evm transaction/call. The
-        /// decoded results is nil if result types are not provided in
-        /// the evm call.
-        access(all) let results: [AnyStruct]?
+        /// Returns the decoded results from the evm call if
+        /// the evm call is successful and resultTypes are provided.
+        /// Otherwise, returns raw result data from the evm call.
+        access(all) let results: [AnyStruct]
 
         /// returns the newly deployed contract address
         /// if the transaction caused such a deployment
@@ -433,7 +433,7 @@ access(all) contract EVM {
             errorCode: UInt64,
             errorMessage: String,
             gasUsed: UInt64,
-            results: [AnyStruct]?,
+            results: [AnyStruct],
             contractAddress: [UInt8; 20]?
         ) {
             self.status = status
