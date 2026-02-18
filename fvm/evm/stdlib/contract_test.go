@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onflow/flow-go/cmd/util/ledger/util"
 	"github.com/onflow/flow-go/fvm/blueprints"
 	"github.com/onflow/flow-go/fvm/environment"
 	"github.com/onflow/flow-go/fvm/evm/impl"
@@ -32,7 +31,6 @@ import (
 	. "github.com/onflow/flow-go/fvm/evm/testutils"
 	"github.com/onflow/flow-go/fvm/evm/types"
 	"github.com/onflow/flow-go/fvm/meter"
-	"github.com/onflow/flow-go/fvm/tracing"
 	"github.com/onflow/flow-go/model/flow"
 )
 
@@ -348,15 +346,10 @@ func deployContracts(
 func newEVMTransactionEnvironment(handler types.ContractHandler, contractAddress flow.Address) runtime.Environment {
 	transactionEnvironment := runtime.NewBaseInterpreterEnvironment(runtime.Config{})
 
-	cryptoLibrary := environment.NewCryptoLibrary(tracing.NewTracerSpan(), util.NopMeter{})
-
 	internalEVMValue := impl.NewInternalEVMContractValue(
 		nil,
 		handler,
 		contractAddress,
-		func(data []byte, tag string) ([]byte, error) {
-			return cryptoLibrary.Hash(data, tag, runtime.HashAlgorithmKECCAK_256)
-		},
 	)
 
 	stdlib.SetupEnvironment(
@@ -371,15 +364,10 @@ func newEVMTransactionEnvironment(handler types.ContractHandler, contractAddress
 func newEVMScriptEnvironment(handler types.ContractHandler, contractAddress flow.Address) runtime.Environment {
 	scriptEnvironment := runtime.NewScriptInterpreterEnvironment(runtime.Config{})
 
-	cryptoLibrary := environment.NewCryptoLibrary(tracing.NewTracerSpan(), util.NopMeter{})
-
 	internalEVMValue := impl.NewInternalEVMContractValue(
 		nil,
 		handler,
 		contractAddress,
-		func(data []byte, tag string) ([]byte, error) {
-			return cryptoLibrary.Hash(data, tag, runtime.HashAlgorithmKECCAK_256)
-		},
 	)
 
 	stdlib.SetupEnvironment(

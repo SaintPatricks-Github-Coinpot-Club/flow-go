@@ -3,7 +3,6 @@ package runtime
 import (
 	"github.com/onflow/cadence/common"
 	"github.com/onflow/cadence/interpreter"
-	cadenceruntime "github.com/onflow/cadence/runtime"
 	"github.com/onflow/cadence/sema"
 	"github.com/onflow/cadence/stdlib"
 
@@ -114,8 +113,5 @@ func EVMInternalEVMContractValue(chainID flow.ChainID, fvmEnv environment.Enviro
 		nil,
 		contractHandler,
 		evmContractAddress,
-		func(data []byte, tag string) ([]byte, error) {
-			return fvmEnv.Hash(data, tag, cadenceruntime.HashAlgorithmKECCAK_256)
-		},
 	)
 }

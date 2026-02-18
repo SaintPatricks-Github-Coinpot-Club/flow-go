@@ -16,6 +16,7 @@ import (
 	"github.com/onflow/flow-go/model/flow"
 
 	gethTypes "github.com/ethereum/go-ethereum/core/types"
+	gethCrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 var internalEVMContractStaticType = interpreter.ConvertSemaCompositeTypeToStaticCompositeType(
@@ -27,7 +28,6 @@ func NewInternalEVMContractValue(
 	gauge common.MemoryGauge,
 	handler types.ContractHandler,
 	contractAddress flow.Address,
-	keccak256Hash func(data []byte, tag string) ([]byte, error),
 ) *interpreter.SimpleCompositeValue {
 	location := common.NewAddressLocation(nil, common.Address(contractAddress), stdlib.ContractName)
 
@@ -41,7 +41,7 @@ func NewInternalEVMContractValue(
 			stdlib.InternalEVMTypeBatchRunFunctionName:                  newInternalEVMTypeBatchRunFunction(gauge, handler),
 			stdlib.InternalEVMTypeCreateCadenceOwnedAccountFunctionName: newInternalEVMTypeCreateCadenceOwnedAccountFunction(gauge, handler),
 			stdlib.InternalEVMTypeCallFunctionName:                      newInternalEVMTypeCallFunction(gauge, handler),
-			stdlib.InternalEVMTypeCallWithSigAndArgsFunctionName:        newInternalEVMTypeCallWithSigAndArgsFunction(gauge, handler, location, keccak256Hash),
+			stdlib.InternalEVMTypeCallWithSigAndArgsFunctionName:        newInternalEVMTypeCallWithSigAndArgsFunction(gauge, handler, location),
 			stdlib.InternalEVMTypeDepositFunctionName:                   newInternalEVMTypeDepositFunction(gauge, handler),
 			stdlib.InternalEVMTypeWithdrawFunctionName:                  newInternalEVMTypeWithdrawFunction(gauge, handler),
 			stdlib.InternalEVMTypeDeployFunctionName:                    newInternalEVMTypeDeployFunction(gauge, handler),
@@ -56,7 +56,7 @@ func NewInternalEVMContractValue(
 			stdlib.InternalEVMTypeGetLatestBlockFunctionName:            newInternalEVMTypeGetLatestBlockFunction(gauge, handler),
 			stdlib.InternalEVMTypeDryRunFunctionName:                    newInternalEVMTypeDryRunFunction(gauge, handler),
 			stdlib.InternalEVMTypeDryCallFunctionName:                   newInternalEVMTypeDryCallFunction(gauge, handler),
-			stdlib.InternalEVMTypeDryCallWithSigAndArgsFunctionName:     newInternalEVMTypeDryCallWithSigAndArgsFunction(gauge, handler, location, keccak256Hash),
+			stdlib.InternalEVMTypeDryCallWithSigAndArgsFunctionName:     newInternalEVMTypeDryCallWithSigAndArgsFunction(gauge, handler, location),
 			stdlib.InternalEVMTypeCommitBlockProposalFunctionName:       newInternalEVMTypeCommitBlockProposalFunction(gauge, handler),
 		},
 		nil,
@@ -458,7 +458,6 @@ func newInternalEVMTypeCallWithSigAndArgsFunction(
 	gauge common.MemoryGauge,
 	handler types.ContractHandler,
 	location common.AddressLocation,
-	keccak256Hash func(data []byte, tag string) ([]byte, error),
 ) *interpreter.HostFunctionValue {
 	evmSpecialTypeIDs := NewEVMSpecialTypeIDs(gauge, location)
 
@@ -477,7 +476,7 @@ func newInternalEVMTypeCallWithSigAndArgsFunction(
 
 			// Encode signature and arguments
 
-			data, err := encodeABIWithSigAndArgs(context, evmSpecialTypeIDs, keccak256Hash, callArgs.signature, callArgs.args)
+			data, err := encodeABIWithSigAndArgs(context, evmSpecialTypeIDs, callArgs.signature, callArgs.args)
 			if err != nil {
 				panic(err)
 			}
@@ -538,7 +537,6 @@ func newInternalEVMTypeDryCallWithSigAndArgsFunction(
 	gauge common.MemoryGauge,
 	handler types.ContractHandler,
 	location common.AddressLocation,
-	keccak256Hash func(data []byte, tag string) ([]byte, error),
 ) *interpreter.HostFunctionValue {
 	evmSpecialTypeIDs := NewEVMSpecialTypeIDs(gauge, location)
 
@@ -556,7 +554,7 @@ func newInternalEVMTypeDryCallWithSigAndArgsFunction(
 			}
 			to := callArgs.to.ToCommon()
 
-			data, err := encodeABIWithSigAndArgs(context, evmSpecialTypeIDs, keccak256Hash, callArgs.signature, callArgs.args)
+			data, err := encodeABIWithSigAndArgs(context, evmSpecialTypeIDs, callArgs.signature, callArgs.args)
 			if err != nil {
 				panic(err)
 			}
@@ -1564,14 +1562,10 @@ func parseCallArgumentsWithSigAndArgs(invocation interpreter.Invocation) (*callA
 func encodeABIWithSigAndArgs(
 	context interpreter.InvocationContext,
 	evmSpecialTypeIDs *evmSpecialTypeIDs,
-	keccak256Hash func(data []byte, tag string) ([]byte, error),
 	signature string,
 	args *interpreter.ArrayValue,
 ) ([]byte, error) {
-	sig, err := keccak256Hash([]byte(signature), "")
-	if err != nil {
-		return nil, err
-	}
+	sig := gethCrypto.Keccak256([]byte(signature))
 
 	if len(sig) < 4 {
 		return nil, errors.NewUnreachableError()
