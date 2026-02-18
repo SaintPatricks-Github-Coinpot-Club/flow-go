@@ -1007,7 +1007,7 @@ func decodeABIs(
 
 	decodedValues, err := arguments.Unpack(data)
 	if err != nil {
-		panic(abiDecodingError{})
+		panic(abiDecodingError{Message: err.Error()})
 	}
 
 	values := make([]interpreter.Value, 0, len(decodedValues))

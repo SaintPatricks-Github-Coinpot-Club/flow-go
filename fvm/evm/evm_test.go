@@ -3848,7 +3848,6 @@ func TestDryCallWithSignAndArgs(t *testing.T) {
 				testAccount *EOATestAccount,
 			) {
 				updatedValue := int64(1337)
-				//data := testContract.MakeCallData(t, "store", big.NewInt(updatedValue))
 
 				signature := "store(uint256)"
 				args := []cadence.Value{
