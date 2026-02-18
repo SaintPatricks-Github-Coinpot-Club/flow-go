@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -377,7 +378,14 @@ func main() {
 			return nil
 		}).
 		Module("beacon key verification", func(node *cmd.NodeConfig) error {
-			return dkgmodule.VerifyBeaconKeyForEpoch(node.Logger, node.NodeID, node.State, myBeaconKeyStateMachine, requireBeaconKeyOnStartup)
+			err := dkgmodule.VerifyBeaconKeyForEpoch(node.Logger, node.NodeID, node.State, myBeaconKeyStateMachine, requireBeaconKeyOnStartup)
+			if err != nil {
+				log.Fatal("This node is configured with --require-beacon-key=true (default), but failed to find a valid beacon key for the " +
+					"current epoch on startup. This default check is used as a safety precaution to prevent many Consensus nodes from being " +
+					"started up, all without valid beacon keys, as this can compromise liveness on the network. If you operate more than one " +
+					"Flow Consensus node, contact Flow Foundation operator support for guidance on how to proceed.")
+			}
+			return nil
 		}).
 		Module("collection guarantees mempool", func(node *cmd.NodeConfig) error {
 			guarantees = stdmap.NewGuarantees(guaranteeLimit)
