@@ -246,17 +246,22 @@ func (c *ExtendedIndexer) indexNextHeights() (bool, error) {
 	for height, group := range backfillGroups {
 		data, err := c.blockDataFromStorage(height)
 		if err != nil {
+			if !errors.Is(err, storage.ErrNotFound) {
+				return false, fmt.Errorf("failed to get block data for height %d: %w", height, err)
+			}
+
 			// on startup, it's possible that indexers are already caught up, but the live block has
 			// not been provided yet. in this case, skip the group until the live block is known.
 			// this check will ensure backfilling progresses if and only if the live block is also
 			// progressing.
-			if latestBlockData == nil && errors.Is(err, storage.ErrNotFound) {
+			if latestBlockData == nil {
 				continue
 			}
 
 			// if the live block is known, it must have all data available since this height is below
 			// the `latestBlockData` height. otherwise the database is in an inconsistent state.
-			return false, fmt.Errorf("failed to get block data for height %d: %w", height, err)
+			return false, fmt.Errorf("failed to get block data for height %d when latest block %d is known: %w",
+				height, latestBlockData.Header.Height, err)
 		}
 
 		err = c.runIndexers(group, &data)
