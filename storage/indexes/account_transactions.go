@@ -496,7 +496,7 @@ func decodeAccountTxKey(key []byte) (flow.Address, uint64, uint32, error) {
 	return address, height, txIndex, nil
 }
 
-// accountTxHeightLookup reads a height value from the database.
+// accountTxHeightLookup reads a height boundary (first/last) for the account transactions index from the database.
 //
 // Expected error returns during normal operations:
 //   - [storage.ErrNotFound] if the height is not found
