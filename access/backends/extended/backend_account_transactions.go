@@ -97,7 +97,6 @@ func NewAccountTransactionsBackend(
 // Expected error returns during normal operations:
 //   - [codes.FailedPrecondition] if the account transaction index has not been initialized
 //   - [codes.OutOfRange] if the cursor references a height outside the indexed range
-//   - [codes.Internal] if there is an unexpected error
 func (b *AccountTransactionsBackend) GetAccountTransactions(
 	ctx context.Context,
 	address flow.Address,
@@ -132,8 +131,9 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 	for i := range page.Transactions {
 		err := b.enrichTransaction(ctx, &page.Transactions[i], expandResults, encodingVersion)
 		if err != nil {
-			// all errors are internal since data should exist in storage
-			return nil, status.Errorf(codes.Internal, "failed to populate details for transaction %s: %v", page.Transactions[i].TransactionID, err)
+			err = fmt.Errorf("failed to populate details for transaction %s: %w", page.Transactions[i].TransactionID, err)
+			irrecoverable.Throw(ctx, err)
+			return nil, err
 		}
 	}
 
@@ -176,18 +176,14 @@ func (b *AccountTransactionsBackend) enrichTransaction(
 	}
 
 	var collectionID flow.Identifier
-	collection, err := b.collections.LightByTransactionID(tx.TransactionID)
-	if err != nil {
-		if !errors.Is(err, storage.ErrNotFound) {
+	if !isSystemChunkTx {
+		collection, err := b.collections.LightByTransactionID(tx.TransactionID)
+		if err != nil {
 			return fmt.Errorf("could not retrieve collection: %w", err)
 		}
-		if !isSystemChunkTx {
-			return fmt.Errorf("could not retrieve collection: %w", err)
-		}
-		// for system chunk transactions, use the zero ID
-		collectionID = flow.ZeroID
-	} else {
 		collectionID = collection.ID()
+	} else {
+		collectionID = flow.ZeroID
 	}
 
 	result, err := b.transactionsProvider.TransactionResult(ctx, header, tx.TransactionID, collectionID, encodingVersion)

@@ -99,10 +99,8 @@ func (h *HttpHandler) ErrorHandler(w http.ResponseWriter, err error, errorLogger
 			h.errorResponse(w, http.StatusServiceUnavailable, msg, errorLogger)
 			return
 		case codes.FailedPrecondition:
-			// indicates the system wasn't in a state to handle the request but may be in the future
-			// there's no direct translation into HTTP status code, but NotFound is the closest match
 			msg := fmt.Sprintf("Precondition failed: %s", se.Message())
-			h.errorResponse(w, http.StatusNotFound, msg, errorLogger)
+			h.errorResponse(w, http.StatusBadRequest, msg, errorLogger)
 			return
 		case codes.OutOfRange:
 			msg := fmt.Sprintf("Out of range: %s", se.Message())

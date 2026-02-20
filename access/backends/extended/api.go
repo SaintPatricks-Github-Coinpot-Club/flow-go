@@ -19,7 +19,6 @@ type API interface {
 	// Expected error returns during normal operations:
 	//   - [codes.FailedPrecondition] if the account transaction index has not been initialized
 	//   - [codes.OutOfRange] if the cursor references a height outside the indexed range
-	//   - [codes.Internal] if there is an unexpected error
 	GetAccountTransactions(
 		ctx context.Context,
 		address flow.Address,
