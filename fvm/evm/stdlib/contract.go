@@ -401,6 +401,7 @@ var InternalEVMTypeBalanceFunctionType = &sema.FunctionType{
 const InternalEVMTypeNonceFunctionName = "nonce"
 
 var InternalEVMTypeNonceFunctionType = &sema.FunctionType{
+	Purity: sema.FunctionPurityView,
 	Parameters: []sema.Parameter{
 		{
 			Label:          "address",
@@ -415,6 +416,7 @@ var InternalEVMTypeNonceFunctionType = &sema.FunctionType{
 const InternalEVMTypeCodeFunctionName = "code"
 
 var InternalEVMTypeCodeFunctionType = &sema.FunctionType{
+	Purity: sema.FunctionPurityView,
 	Parameters: []sema.Parameter{
 		{
 			Label:          "address",
@@ -429,13 +431,14 @@ var InternalEVMTypeCodeFunctionType = &sema.FunctionType{
 const InternalEVMTypeCodeHashFunctionName = "codeHash"
 
 var InternalEVMTypeCodeHashFunctionType = &sema.FunctionType{
+	Purity: sema.FunctionPurityView,
 	Parameters: []sema.Parameter{
 		{
 			Label:          "address",
 			TypeAnnotation: sema.NewTypeAnnotation(EVMAddressBytesType),
 		},
 	},
-	ReturnTypeAnnotation: sema.NewTypeAnnotation(sema.ByteArrayType),
+	ReturnTypeAnnotation: sema.NewTypeAnnotation(sema.NewConstantSizedType(nil, sema.UInt8Type, EVMBytes32Length)),
 }
 
 // InternalEVM.withdraw

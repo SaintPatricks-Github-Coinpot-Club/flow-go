@@ -97,8 +97,8 @@ func (bv *ReadOnlyBlockView) CodeOf(address types.Address) (types.Code, error) {
 }
 
 // CodeHashOf returns the code hash of the given address
-func (bv *ReadOnlyBlockView) CodeHashOf(address types.Address) ([]byte, error) {
-	return bv.state.GetCodeHash(address.ToCommon()).Bytes(), bv.state.Error()
+func (bv *ReadOnlyBlockView) CodeHashOf(address types.Address) (gethCommon.Hash, error) {
+	return bv.state.GetCodeHash(address.ToCommon()), bv.state.Error()
 }
 
 // BlockView allows mutation of the evm state as part of a block
