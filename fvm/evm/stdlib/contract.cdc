@@ -240,13 +240,19 @@ access(all) contract EVM {
             asHex.length == 40 || asHex.length == 42:
                 "EVM.addressFromString(): Invalid hex string length for an EVM address. The provided string is \(asHex.length), but the length must be 40 or 42."
         }
-        if asHex.length == 42 && !(asHex[0] == "0" && asHex[1] == "x") {
-            panic("Invalid string with non-hex prefix")
-        }
         // Strip the 0x prefix if it exists
-        var withoutPrefix = (asHex.length == 42 ? asHex.slice(from: 2, upTo: asHex.length) : asHex).toLower()
-        let bytes = withoutPrefix.decodeHex().toConstantSized<[UInt8; 20]>()!
-        return EVMAddress(bytes: bytes)
+        var withoutPrefix = asHex
+        if asHex.length == 42 {
+            assert(
+                asHex[0] == "0" && asHex[1] == "x",
+                message: "Invalid string with non-hex prefix"
+            )
+            withoutPrefix = asHex.slice(from: 2, upTo: asHex.length)
+        }
+
+        return EVMAddress(
+            bytes: withoutPrefix.decodeHex().toConstantSized<[UInt8; 20]>()!
+        )
     }
 
     /// EVMBytes is a type wrapper used for ABI encoding/decoding into
