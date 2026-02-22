@@ -4919,6 +4919,233 @@ func TestEVMFileSystemContract(t *testing.T) {
 	})
 }
 
+func TestEVMaddressFromString(t *testing.T) {
+	t.Parallel()
+
+	chain := flow.Emulator.Chain()
+	sc := systemcontracts.SystemContractsForChain(chain.ChainID())
+
+	t.Run("valid EVM address without prefix", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("E62340807933BCFC3b89FE121dDC0ae5DA9599a0")
+						assert(
+							address.toString() == "e62340807933bcfc3b89fe121ddc0ae5da9599a0",
+							message: "unexpected EVM address"
+						)
+						return true
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.NoError(t, output.Err)
+			},
+		)
+	})
+
+	t.Run("valid EVM address with prefix", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("0xE62340807933BCFC3b89FE121dDC0ae5DA9599a0")
+						assert(
+							address.toString() == "e62340807933bcfc3b89fe121ddc0ae5da9599a0",
+							message: "unexpected EVM address"
+						)
+						return true
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.NoError(t, output.Err)
+			},
+		)
+	})
+
+	t.Run("invalid EVM address with non-hex prefix", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("2xE62340807933BCFC3b89FE121dDC0ae5DA9599a0")
+						assert(
+							address.toString() == "e62340807933bcfc3b89fe121ddc0ae5da9599a0",
+							message: "unexpected EVM address"
+						)
+						return true
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.Error(t, output.Err)
+				require.ErrorContains(
+					t,
+					output.Err,
+					"EVM.addressFromString(): The 42-character EVM address string must have a '0x' prefix",
+				)
+			},
+		)
+	})
+
+	t.Run("invalid EVM address with non-hex characters", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
+						return false
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.Error(t, output.Err)
+				require.ErrorContains(
+					t,
+					output.Err,
+					"invalid byte in hex string: 47",
+				)
+			},
+		)
+	})
+
+	t.Run("invalid EVM address with insufficient length", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("0xE62340807933BCFC3b89FE121dDC0ae5DA95")
+						assert(
+							address.toString() == "e62340807933bcfc3b89fe121ddc0ae5da95",
+							message: "unexpected EVM address"
+						)
+						return true
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.Error(t, output.Err)
+				require.ErrorContains(
+					t,
+					output.Err,
+					"Invalid hex string length for an EVM address. The provided string is 38, but the length must be 40 or 42",
+				)
+			},
+		)
+	})
+
+	t.Run("invalid EVM address with superfluous length", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("0xE62340807933BCFC3b89FE121dDC0ae5DA9599a0a1")
+						assert(
+							address.toString() == "e62340807933bcfc3b89fe121ddc0ae5da9599a0a1",
+							message: "unexpected EVM address"
+						)
+						return true
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.Error(t, output.Err)
+				require.ErrorContains(
+					t,
+					output.Err,
+					"Invalid hex string length for an EVM address. The provided string is 44, but the length must be 40 or 42",
+				)
+			},
+		)
+	})
+}
+
 func createAndFundFlowAccount(
 	t *testing.T,
 	ctx fvm.Context,
