@@ -245,7 +245,7 @@ access(all) contract EVM {
         if asHex.length == 42 {
             assert(
                 asHex[0] == "0" && asHex[1] == "x",
-                message: "Invalid string with non-hex prefix"
+                message: "EVM.addressFromString(): The 42-character EVM address string must have a '0x' prefix"
             )
             withoutPrefix = asHex.slice(from: 2, upTo: asHex.length)
         }

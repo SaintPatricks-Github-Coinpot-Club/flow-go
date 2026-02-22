@@ -5026,7 +5026,42 @@ func TestEVMaddressFromString(t *testing.T) {
 				require.ErrorContains(
 					t,
 					output.Err,
-					"Invalid string with non-hex prefix",
+					"EVM.addressFromString(): The 42-character EVM address string must have a '0x' prefix",
+				)
+			},
+		)
+	})
+
+	t.Run("invalid EVM address with non-hex characters", func(t *testing.T) {
+		RunWithNewEnvironment(t,
+			chain, func(
+				ctx fvm.Context,
+				vm fvm.VM,
+				snapshot snapshot.SnapshotTree,
+				testContract *TestContract,
+				testAccount *EOATestAccount,
+			) {
+				code := []byte(fmt.Sprintf(
+					`
+					import EVM from %s
+
+					access(all)
+					fun main(): Bool {
+						let address = EVM.addressFromString("0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
+						return false
+					}
+					`,
+					sc.EVMContract.Address.HexWithPrefix(),
+				))
+
+				script := fvm.Script(code)
+				_, output, err := vm.Run(ctx, script, snapshot)
+				require.NoError(t, err)
+				require.Error(t, output.Err)
+				require.ErrorContains(
+					t,
+					output.Err,
+					"invalid byte in hex string: 47",
 				)
 			},
 		)
