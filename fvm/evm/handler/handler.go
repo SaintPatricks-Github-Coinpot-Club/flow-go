@@ -804,16 +804,16 @@ func (a *Account) code() (types.Code, error) {
 //
 // Note: we don't meter any extra computation given reading data
 // from the storage already translates into computation
-func (a *Account) CodeHash() gethCommon.Hash {
+func (a *Account) CodeHash() []byte {
 	codeHash, err := a.codeHash()
 	panicOnError(err)
 	return codeHash
 }
 
-func (a *Account) codeHash() (gethCommon.Hash, error) {
+func (a *Account) codeHash() ([]byte, error) {
 	blk, err := a.fch.emulator.NewReadOnlyBlockView()
 	if err != nil {
-		return gethCommon.Hash{}, err
+		return nil, err
 	}
 	return blk.CodeHashOf(a.address)
 }

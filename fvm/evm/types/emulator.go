@@ -74,7 +74,7 @@ type ReadOnlyBlockView interface {
 	// CodeOf returns the code for this address
 	CodeOf(address Address) (Code, error)
 	// CodeHashOf returns the code hash for this address
-	CodeHashOf(address Address) (gethCommon.Hash, error)
+	CodeHashOf(address Address) ([]byte, error)
 }
 
 // BlockView facilitates execution of a transaction or a direct evm call in the context of a block

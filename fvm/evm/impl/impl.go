@@ -694,7 +694,7 @@ func newInternalEVMTypeCodeHashFunction(
 			const isAuthorized = false
 			account := handler.AccountByAddress(address, isAuthorized)
 
-			return EVMBytes32ToBytesArrayValue(context, account.CodeHash())
+			return interpreter.ByteSliceToByteArrayValue(context, account.CodeHash())
 		},
 	)
 }

@@ -1,7 +1,5 @@
 package types
 
-import gethCommon "github.com/ethereum/go-ethereum/common"
-
 // Account is an EVM account, currently
 // three types of accounts are supported on Flow EVM,
 // externally owned accounts (EOAs), smart contract accounts and cadence owned accounts
@@ -24,7 +22,7 @@ type Account interface {
 	Code() Code
 
 	// CodeHash returns the code hash of this account
-	CodeHash() gethCommon.Hash
+	CodeHash() []byte
 
 	// Nonce returns the nonce of this account
 	Nonce() uint64

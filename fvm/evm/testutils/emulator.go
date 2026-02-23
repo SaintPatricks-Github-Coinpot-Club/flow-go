@@ -14,7 +14,7 @@ type TestEmulator struct {
 	BalanceOfFunc           func(address types.Address) (*big.Int, error)
 	NonceOfFunc             func(address types.Address) (uint64, error)
 	CodeOfFunc              func(address types.Address) (types.Code, error)
-	CodeHashOfFunc          func(address types.Address) (gethCommon.Hash, error)
+	CodeHashOfFunc          func(address types.Address) ([]byte, error)
 	DirectCallFunc          func(call *types.DirectCall) (*types.Result, error)
 	RunTransactionFunc      func(tx *gethTypes.Transaction) (*types.Result, error)
 	DryRunTransactionFunc   func(tx *gethTypes.Transaction, address gethCommon.Address) (*types.Result, error)
@@ -58,7 +58,7 @@ func (em *TestEmulator) CodeOf(address types.Address) (types.Code, error) {
 }
 
 // CodeHashOf returns the code hash for this address
-func (em *TestEmulator) CodeHashOf(address types.Address) (gethCommon.Hash, error) {
+func (em *TestEmulator) CodeHashOf(address types.Address) ([]byte, error) {
 	if em.CodeHashOfFunc == nil {
 		panic("method not set")
 	}

@@ -148,7 +148,7 @@ type testFlowAccount struct {
 	address  types.Address
 	balance  func() types.Balance
 	code     func() types.Code
-	codeHash func() gethCommon.Hash
+	codeHash func() []byte
 	nonce    func() uint64
 	transfer func(address types.Address, balance types.Balance)
 	deposit  func(vault *types.FLOWTokenVault)
@@ -177,9 +177,9 @@ func (t *testFlowAccount) Code() types.Code {
 	return t.code()
 }
 
-func (t *testFlowAccount) CodeHash() gethCommon.Hash {
+func (t *testFlowAccount) CodeHash() []byte {
 	if t.codeHash == nil {
-		return gethCommon.Hash{}
+		return nil
 	}
 	return t.codeHash()
 }
@@ -7231,8 +7231,8 @@ func TestEVMAccountCodeHash(t *testing.T) {
 
 			return &testFlowAccount{
 				address: fromAddress,
-				codeHash: func() gethCommon.Hash {
-					return expectedCodeHashRaw
+				codeHash: func() []byte {
+					return expectedCodeHashRaw.Bytes()
 				},
 			}
 		},

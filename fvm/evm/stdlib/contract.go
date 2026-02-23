@@ -438,7 +438,7 @@ var InternalEVMTypeCodeHashFunctionType = &sema.FunctionType{
 			TypeAnnotation: sema.NewTypeAnnotation(EVMAddressBytesType),
 		},
 	},
-	ReturnTypeAnnotation: sema.NewTypeAnnotation(sema.NewConstantSizedType(nil, sema.UInt8Type, EVMBytes32Length)),
+	ReturnTypeAnnotation: sema.NewTypeAnnotation(sema.ByteArrayType),
 }
 
 // InternalEVM.withdraw
