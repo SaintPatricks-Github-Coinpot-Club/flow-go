@@ -1022,10 +1022,9 @@ func TestGetTransactionResult(t *testing.T) {
 				unittest.Event.WithTransactionID(id),
 			),
 		},
-		ErrorMessage:    "",
-		BlockID:         bid,
-		CollectionID:    cid,
-		ComputationUsed: 1234,
+		ErrorMessage: "",
+		BlockID:      bid,
+		CollectionID: cid,
 	}
 	txr.Events[0].Payload = []byte(`test payload`)
 	expected := fmt.Sprintf(`{
@@ -1035,7 +1034,7 @@ func TestGetTransactionResult(t *testing.T) {
 			"status": "Sealed",
 			"status_code": 10,
 			"error_message": "",
-			"computation_used": "1234",
+			"computation_used": "0",
 			"events": [
 				{
 					"type": "flow.AccountCreated",

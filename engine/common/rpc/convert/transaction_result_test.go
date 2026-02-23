@@ -40,14 +40,13 @@ func TestConvertTransactionResults(t *testing.T) {
 
 func txResultFixture() *accessmodel.TransactionResult {
 	return &accessmodel.TransactionResult{
-		Status:          flow.TransactionStatusExecuted,
-		StatusCode:      0,
-		Events:          unittest.EventsFixture(3),
-		ErrorMessage:    "",
-		BlockID:         unittest.IdentifierFixture(),
-		TransactionID:   unittest.IdentifierFixture(),
-		CollectionID:    unittest.IdentifierFixture(),
-		BlockHeight:     100,
-		ComputationUsed: 9999,
+		Status:        flow.TransactionStatusExecuted,
+		StatusCode:    0,
+		Events:        unittest.EventsFixture(3),
+		ErrorMessage:  "",
+		BlockID:       unittest.IdentifierFixture(),
+		TransactionID: unittest.IdentifierFixture(),
+		CollectionID:  unittest.IdentifierFixture(),
+		BlockHeight:   100,
 	}
 }
