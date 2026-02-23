@@ -21,10 +21,10 @@ import (
 //   - nodeID: the node's identifier
 //   - protocolState: the protocol state to query epoch and DKG information
 //   - beaconKeys: storage for retrieving the beacon private key
-//   - requireKeyPresent: if false, verification is skipped and the function returns nil immediately
+//   - requireKeyPresent: if false, verification failures are logged as warnings and the function returns nil instead of an error
 //
 // Returns nil if:
-//   - requireKeyPresent is false (verification skipped), OR
+//   - requireKeyPresent is false and a verification failure occurs (logged as warning), OR
 //   - the beacon key exists, is safe, and matches the expected public key, OR
 //   - the node is not a DKG participant for the current epoch (nothing to verify)
 //
