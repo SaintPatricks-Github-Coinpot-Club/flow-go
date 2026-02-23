@@ -504,6 +504,9 @@ func (h *ContractHandler) dryRunTx(
 	}
 
 	var res *types.Result
+	// just like with EVM.run / EVM.batchRun / COA.call, we disable metering
+	// so we can fully meter the gas usage in the next step, even in case
+	// of unhandled errors/exceptions.
 	h.backend.RunWithMeteringDisabled(func() {
 		res, err = blk.DryRunTransaction(tx, from.ToCommon())
 	})
