@@ -8,12 +8,14 @@ on:
       - trying
       - 'feature/**'
       - 'v[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+-rc'
   pull_request:
     branches:
       - master*
       - 'auto-cadence-upgrade/**'
       - 'feature/**'
       - 'v[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+-rc'
   merge_group:
     branches:
       - master
