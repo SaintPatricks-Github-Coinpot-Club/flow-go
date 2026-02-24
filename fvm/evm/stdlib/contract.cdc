@@ -191,10 +191,10 @@ access(all) contract EVM {
 
         /// CodeHash of the address
         access(all)
-        view fun codeHash(): [UInt8; 32] {
+        view fun codeHash(): [UInt8] {
             return InternalEVM.codeHash(
                 address: self.bytes
-            ).toConstantSized<[UInt8; 32]>()!
+            )
         }
 
         /// Deposits the given vault into the EVM account with the given address

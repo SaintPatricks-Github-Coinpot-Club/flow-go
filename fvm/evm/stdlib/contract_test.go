@@ -7220,7 +7220,7 @@ func TestEVMAccountCodeHash(t *testing.T) {
 	}
 	expectedCodeHashValue := cadence.NewArray(
 		byteValues,
-	).WithType(cadence.NewConstantSizedArrayType(32, cadence.UInt8Type))
+	).WithType(cadence.NewVariableSizedArrayType(cadence.UInt8Type))
 
 	handler := &testContractHandler{
 		flowTokenAddress:   common.Address(contractsAddress),
@@ -7242,7 +7242,7 @@ func TestEVMAccountCodeHash(t *testing.T) {
       import EVM from 0x1
 
       access(all)
-      fun main(): [UInt8; 32] {
+      fun main(): [UInt8] {
           let cadenceOwnedAccount <- EVM.createCadenceOwnedAccount()
           let codeHash = cadenceOwnedAccount.address().codeHash()
           destroy cadenceOwnedAccount
