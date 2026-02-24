@@ -19,33 +19,27 @@ import (
 	"github.com/onflow/flow-go/storage"
 )
 
-type TransactionFilter storage.IndexFilter[*accessmodel.AccountTransaction]
-
-func HasRoles(roles ...accessmodel.TransactionRole) TransactionFilter {
-	searchRoles := make(map[accessmodel.TransactionRole]struct{}, len(roles))
-	for _, role := range roles {
-		searchRoles[role] = struct{}{}
-	}
-	return func(tx *accessmodel.AccountTransaction) bool {
-		for _, role := range tx.Roles {
-			if _, ok := searchRoles[role]; ok {
-				return true
-			}
-		}
-		return false
-	}
-}
-
 type AccountTransactionFilter struct {
 	Roles []accessmodel.TransactionRole
 }
 
 func (f *AccountTransactionFilter) Filter() storage.IndexFilter[*accessmodel.AccountTransaction] {
+	if len(f.Roles) == 0 {
+		return nil
+	}
+
+	rolesMap := make(map[accessmodel.TransactionRole]bool, len(f.Roles))
+	for _, role := range f.Roles {
+		rolesMap[role] = true
+	}
+
 	return func(tx *accessmodel.AccountTransaction) bool {
-		if len(f.Roles) > 0 {
-			return HasRoles(f.Roles...)(tx)
+		for _, role := range tx.Roles {
+			if rolesMap[role] {
+				return true
+			}
 		}
-		return true
+		return false
 	}
 }
 
