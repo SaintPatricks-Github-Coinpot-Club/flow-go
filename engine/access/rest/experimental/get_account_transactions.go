@@ -60,7 +60,9 @@ func GetAccountTransactions(r *common.Request, backend extended.API, link common
 		if err != nil {
 			return nil, common.NewBadRequestError(err)
 		}
-		cursor = c
+		if c.BlockHeight != 0 && c.TransactionIndex != 0 {
+			cursor = c
+		}
 	}
 
 	var filter extended.AccountTransactionFilter
