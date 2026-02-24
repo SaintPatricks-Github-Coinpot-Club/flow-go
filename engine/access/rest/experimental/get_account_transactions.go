@@ -77,9 +77,12 @@ func GetAccountTransactions(r *common.Request, backend extended.API, link common
 		}
 	}
 
-	expandFields := r.Expands("transaction") || r.Expands("result")
+	expandOptions := extended.AccountTransactionExpandOptions{
+		Transaction: r.Expands("transaction"),
+		Result:      r.Expands("result"),
+	}
 
-	page, err := backend.GetAccountTransactions(r.Context(), address, limit, cursor, filter, expandFields, entities.EventEncodingVersion_JSON_CDC_V0)
+	page, err := backend.GetAccountTransactions(r.Context(), address, limit, cursor, filter, expandOptions, entities.EventEncodingVersion_JSON_CDC_V0)
 	if err != nil {
 		return nil, err
 	}

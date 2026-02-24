@@ -42,8 +42,8 @@ func (_m *API) EXPECT() *API_Expecter {
 }
 
 // GetAccountTransactions provides a mock function for the type API
-func (_mock *API) GetAccountTransactions(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandResults bool, encodingVersion entities.EventEncodingVersion) (*access.AccountTransactionsPage, error) {
-	ret := _mock.Called(ctx, address, limit, cursor, filter, expandResults, encodingVersion)
+func (_mock *API) GetAccountTransactions(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandOptions extended.AccountTransactionExpandOptions, encodingVersion entities.EventEncodingVersion) (*access.AccountTransactionsPage, error) {
+	ret := _mock.Called(ctx, address, limit, cursor, filter, expandOptions, encodingVersion)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetAccountTransactions")
@@ -51,18 +51,18 @@ func (_mock *API) GetAccountTransactions(ctx context.Context, address flow.Addre
 
 	var r0 *access.AccountTransactionsPage
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, bool, entities.EventEncodingVersion) (*access.AccountTransactionsPage, error)); ok {
-		return returnFunc(ctx, address, limit, cursor, filter, expandResults, encodingVersion)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, extended.AccountTransactionExpandOptions, entities.EventEncodingVersion) (*access.AccountTransactionsPage, error)); ok {
+		return returnFunc(ctx, address, limit, cursor, filter, expandOptions, encodingVersion)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, bool, entities.EventEncodingVersion) *access.AccountTransactionsPage); ok {
-		r0 = returnFunc(ctx, address, limit, cursor, filter, expandResults, encodingVersion)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, extended.AccountTransactionExpandOptions, entities.EventEncodingVersion) *access.AccountTransactionsPage); ok {
+		r0 = returnFunc(ctx, address, limit, cursor, filter, expandOptions, encodingVersion)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*access.AccountTransactionsPage)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, bool, entities.EventEncodingVersion) error); ok {
-		r1 = returnFunc(ctx, address, limit, cursor, filter, expandResults, encodingVersion)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, flow.Address, uint32, *access.AccountTransactionCursor, extended.AccountTransactionFilter, extended.AccountTransactionExpandOptions, entities.EventEncodingVersion) error); ok {
+		r1 = returnFunc(ctx, address, limit, cursor, filter, expandOptions, encodingVersion)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -80,13 +80,13 @@ type API_GetAccountTransactions_Call struct {
 //   - limit uint32
 //   - cursor *access.AccountTransactionCursor
 //   - filter extended.AccountTransactionFilter
-//   - expandResults bool
+//   - expandOptions extended.AccountTransactionExpandOptions
 //   - encodingVersion entities.EventEncodingVersion
-func (_e *API_Expecter) GetAccountTransactions(ctx interface{}, address interface{}, limit interface{}, cursor interface{}, filter interface{}, expandResults interface{}, encodingVersion interface{}) *API_GetAccountTransactions_Call {
-	return &API_GetAccountTransactions_Call{Call: _e.mock.On("GetAccountTransactions", ctx, address, limit, cursor, filter, expandResults, encodingVersion)}
+func (_e *API_Expecter) GetAccountTransactions(ctx interface{}, address interface{}, limit interface{}, cursor interface{}, filter interface{}, expandOptions interface{}, encodingVersion interface{}) *API_GetAccountTransactions_Call {
+	return &API_GetAccountTransactions_Call{Call: _e.mock.On("GetAccountTransactions", ctx, address, limit, cursor, filter, expandOptions, encodingVersion)}
 }
 
-func (_c *API_GetAccountTransactions_Call) Run(run func(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandResults bool, encodingVersion entities.EventEncodingVersion)) *API_GetAccountTransactions_Call {
+func (_c *API_GetAccountTransactions_Call) Run(run func(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandOptions extended.AccountTransactionExpandOptions, encodingVersion entities.EventEncodingVersion)) *API_GetAccountTransactions_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -108,9 +108,9 @@ func (_c *API_GetAccountTransactions_Call) Run(run func(ctx context.Context, add
 		if args[4] != nil {
 			arg4 = args[4].(extended.AccountTransactionFilter)
 		}
-		var arg5 bool
+		var arg5 extended.AccountTransactionExpandOptions
 		if args[5] != nil {
-			arg5 = args[5].(bool)
+			arg5 = args[5].(extended.AccountTransactionExpandOptions)
 		}
 		var arg6 entities.EventEncodingVersion
 		if args[6] != nil {
@@ -134,7 +134,7 @@ func (_c *API_GetAccountTransactions_Call) Return(accountTransactionsPage *acces
 	return _c
 }
 
-func (_c *API_GetAccountTransactions_Call) RunAndReturn(run func(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandResults bool, encodingVersion entities.EventEncodingVersion) (*access.AccountTransactionsPage, error)) *API_GetAccountTransactions_Call {
+func (_c *API_GetAccountTransactions_Call) RunAndReturn(run func(ctx context.Context, address flow.Address, limit uint32, cursor *access.AccountTransactionCursor, filter extended.AccountTransactionFilter, expandOptions extended.AccountTransactionExpandOptions, encodingVersion entities.EventEncodingVersion) (*access.AccountTransactionsPage, error)) *API_GetAccountTransactions_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -25,7 +25,7 @@ type API interface {
 		limit uint32,
 		cursor *accessmodel.AccountTransactionCursor,
 		filter AccountTransactionFilter,
-		expandResults bool,
+		expandOptions AccountTransactionExpandOptions,
 		encodingVersion entities.EventEncodingVersion,
 	) (*accessmodel.AccountTransactionsPage, error)
 }

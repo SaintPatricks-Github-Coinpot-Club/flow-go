@@ -54,7 +54,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
 		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
-		page, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
+		page, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.NoError(t, err)
 		require.Len(t, page.Transactions, 1)
 		assert.Equal(t, txID, page.Transactions[0].TransactionID)
@@ -83,7 +83,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
 		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
-		_, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.NoError(t, err)
 	})
 
@@ -108,7 +108,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockHeaders.On("BlockIDByHeight", blockHeader.Height).Return(blockHeader.ID(), nil)
 		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
-		_, err := backend.GetAccountTransactions(context.Background(), addr, 500, nil, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(context.Background(), addr, 500, nil, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.NoError(t, err)
 	})
 
@@ -133,7 +133,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		mockHeaders.On("BlockIDByHeight", uint64(50)).Return(blockHeader.ID(), nil)
 		mockHeaders.On("ByBlockID", blockHeader.ID()).Return(blockHeader, nil)
 
-		_, err := backend.GetAccountTransactions(context.Background(), addr, 10, cursor, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(context.Background(), addr, 10, cursor, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.NoError(t, err)
 	})
 
@@ -147,7 +147,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 			addr, uint32(50), (*accessmodel.AccountTransactionCursor)(nil), mocktestify.Anything,
 		).Return(accessmodel.AccountTransactionsPage{}, storage.ErrNotBootstrapped)
 
-		_, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(context.Background(), addr, 0, nil, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.Error(t, err)
 		st, ok := status.FromError(err)
 		require.True(t, ok)
@@ -165,7 +165,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 			addr, uint32(10), cursor, mocktestify.Anything,
 		).Return(accessmodel.AccountTransactionsPage{}, fmt.Errorf("wrapped: %w", storage.ErrHeightNotIndexed))
 
-		_, err := backend.GetAccountTransactions(context.Background(), addr, 10, cursor, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(context.Background(), addr, 10, cursor, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.Error(t, err)
 		st, ok := status.FromError(err)
 		require.True(t, ok)
@@ -187,7 +187,7 @@ func TestBackend_GetAccountTransactions(t *testing.T) {
 		signalerCtx := irrecoverable.WithSignalerContext(context.Background(),
 			irrecoverable.NewMockSignalerContextExpectError(t, context.Background(), expectedErr))
 
-		_, err := backend.GetAccountTransactions(signalerCtx, addr, 0, nil, AccountTransactionFilter{}, false, defaultEncoding)
+		_, err := backend.GetAccountTransactions(signalerCtx, addr, 0, nil, AccountTransactionFilter{}, AccountTransactionExpandOptions{}, defaultEncoding)
 		require.Error(t, err)
 	})
 }

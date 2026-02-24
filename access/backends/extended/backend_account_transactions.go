@@ -19,6 +19,15 @@ import (
 	"github.com/onflow/flow-go/storage"
 )
 
+type AccountTransactionExpandOptions struct {
+	Result      bool
+	Transaction bool
+}
+
+func (o *AccountTransactionExpandOptions) HasExpand() bool {
+	return o.Result || o.Transaction
+}
+
 type AccountTransactionFilter struct {
 	Roles []accessmodel.TransactionRole
 }
@@ -97,7 +106,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 	limit uint32,
 	cursor *accessmodel.AccountTransactionCursor,
 	filter AccountTransactionFilter,
-	expandResults bool,
+	expandOptions AccountTransactionExpandOptions,
 	encodingVersion entities.EventEncodingVersion,
 ) (*accessmodel.AccountTransactionsPage, error) {
 	if limit == 0 {
@@ -123,7 +132,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 	// enrich the transactions with additional details requested by the client
 	// Note: if no transactions are found, the response will include an empty array and no error.
 	for i := range page.Transactions {
-		err := b.enrichTransaction(ctx, &page.Transactions[i], expandResults, encodingVersion)
+		err := b.enrichTransaction(ctx, &page.Transactions[i], expandOptions, encodingVersion)
 		if err != nil {
 			err = fmt.Errorf("failed to populate details for transaction %s: %w", page.Transactions[i].TransactionID, err)
 			irrecoverable.Throw(ctx, err)
@@ -143,7 +152,7 @@ func (b *AccountTransactionsBackend) GetAccountTransactions(
 func (b *AccountTransactionsBackend) enrichTransaction(
 	ctx context.Context,
 	tx *accessmodel.AccountTransaction,
-	expandResults bool,
+	expandOptions AccountTransactionExpandOptions,
 	encodingVersion entities.EventEncodingVersion,
 ) error {
 	blockID, err := b.headers.BlockIDByHeight(tx.BlockHeight)
@@ -160,33 +169,27 @@ func (b *AccountTransactionsBackend) enrichTransaction(
 	tx.BlockTimestamp = header.Timestamp
 
 	// only add the transaction body and result if requested
-	if !expandResults {
+	if !expandOptions.HasExpand() {
 		return nil
 	}
 
-	txBody, isSystemChunkTx, err := b.getTransactionBody(ctx, header, tx.TransactionID)
-	if err != nil {
-		return fmt.Errorf("could not retrieve transaction body: %w", err)
-	}
-
-	var collectionID flow.Identifier
-	if !isSystemChunkTx {
-		collection, err := b.collections.LightByTransactionID(tx.TransactionID)
+	var isSystemChunkTx bool
+	if expandOptions.Transaction {
+		var txBody *flow.TransactionBody
+		txBody, isSystemChunkTx, err = b.getTransactionBody(ctx, header, tx.TransactionID)
 		if err != nil {
-			return fmt.Errorf("could not retrieve collection: %w", err)
+			return fmt.Errorf("could not retrieve transaction body: %w", err)
 		}
-		collectionID = collection.ID()
-	} else {
-		collectionID = flow.ZeroID
+		tx.Transaction = txBody
 	}
 
-	result, err := b.transactionsProvider.TransactionResult(ctx, header, tx.TransactionID, collectionID, encodingVersion)
-	if err != nil {
-		return fmt.Errorf("could not retrieve transaction result: %w", err)
+	if expandOptions.Result {
+		result, err := b.getTransactionResult(ctx, tx.TransactionID, header, isSystemChunkTx, expandOptions, encodingVersion)
+		if err != nil {
+			return fmt.Errorf("could not retrieve transaction result: %w", err)
+		}
+		tx.Result = result
 	}
-
-	tx.Transaction = txBody
-	tx.Result = result
 
 	return nil
 }
@@ -256,4 +259,45 @@ func (b *AccountTransactionsBackend) getTransactionBody(ctx context.Context, hea
 	err = fmt.Errorf("indexed transaction not found")
 	irrecoverable.Throw(ctx, err)
 	return nil, false, err
+}
+
+// getTransactionResult retrieves the transaction result for a given transaction.
+//
+// Expected error returns during normal operation:
+//   - [storage.ErrNotFound] if the transaction is not found
+func (b *AccountTransactionsBackend) getTransactionResult(
+	ctx context.Context,
+	txID flow.Identifier,
+	header *flow.Header,
+	isSystemChunkTx bool,
+	expandOptions AccountTransactionExpandOptions,
+	encodingVersion entities.EventEncodingVersion,
+) (*accessmodel.TransactionResult, error) {
+	// the system collection is not indexed and uses the zero ID by convention.
+	var collectionID flow.Identifier
+
+	if !isSystemChunkTx || !expandOptions.Transaction {
+		collection, err := b.collections.LightByTransactionID(txID)
+		if err != nil {
+			if !errors.Is(err, storage.ErrNotFound) {
+				return nil, fmt.Errorf("could not retrieve collection: %w", err)
+			}
+			// if we have already looked up the transaction and confirmed it is NOT a system chunk tx,
+			// then there should be an entry in the tx/collection index. however, the collection/tx
+			// index is built asynchronously with the extended indexer and may not be available yet.
+			if expandOptions.Transaction {
+				return nil, fmt.Errorf("could not retrieve collection for standard transaction: %w", err)
+			}
+			// system chunk transactions are not indexed by collection, so they will not exist.
+			// if the collection is not found, then this is a system chunk tx.
+		}
+		collectionID = collection.ID()
+	}
+
+	result, err := b.transactionsProvider.TransactionResult(ctx, header, txID, collectionID, encodingVersion)
+	if err != nil {
+		return nil, fmt.Errorf("could not retrieve transaction result: %w", err)
+	}
+
+	return result, nil
 }
