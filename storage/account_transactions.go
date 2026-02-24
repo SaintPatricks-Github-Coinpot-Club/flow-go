@@ -31,6 +31,7 @@ type AccountTransactionsReader interface {
 	// Expected error returns during normal operations:
 	//   - [ErrNotBootstrapped] if the index has not been initialized
 	//   - [storage.ErrHeightNotIndexed] if the cursor height extends beyond indexed heights
+	//   - [storage.ErrInvalidQuery] if the limit is invalid
 	TransactionsByAddress(
 		account flow.Address,
 		limit uint32,

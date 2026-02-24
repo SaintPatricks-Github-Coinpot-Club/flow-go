@@ -136,6 +136,7 @@ func (idx *AccountTransactions) LatestIndexedHeight() uint64 {
 //
 // Expected error returns during normal operations:
 //   - [storage.ErrHeightNotIndexed] if the cursor height extends beyond indexed heights
+//   - [storage.ErrInvalidQuery] if the limit is invalid
 func (idx *AccountTransactions) TransactionsByAddress(
 	account flow.Address,
 	limit uint32,
