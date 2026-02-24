@@ -226,7 +226,7 @@ func lookupAccountTransactions(
 	endKey := makeAccountTxKeyPrefix(address, lowestHeight)
 
 	// We fetch limit+1 to determine if there are more results beyond this page.
-	fetchLimit := int(limit + 1)
+	fetchLimit := limit + 1
 
 	var collected []access.AccountTransaction
 
@@ -266,7 +266,7 @@ func lookupAccountTransactions(
 
 			collected = append(collected, tx)
 
-			if len(collected) >= fetchLimit {
+			if uint32(len(collected)) >= fetchLimit {
 				return true, nil // bail after collecting enough
 			}
 
@@ -277,7 +277,7 @@ func lookupAccountTransactions(
 		return access.AccountTransactionsPage{}, fmt.Errorf("could not iterate keys: %w", err)
 	}
 
-	if len(collected) <= int(limit) {
+	if uint32(len(collected)) <= limit {
 		return access.AccountTransactionsPage{
 			Transactions: collected,
 		}, nil
