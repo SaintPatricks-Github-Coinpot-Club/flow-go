@@ -184,7 +184,7 @@ func (b *AccountTransactionsBackend) enrichTransaction(
 	}
 
 	if expandOptions.Result {
-		result, err := b.getTransactionResult(ctx, tx.TransactionID, header, isSystemChunkTx, expandOptions, encodingVersion)
+		result, err := b.getTransactionResult(ctx, tx.TransactionID, header, isSystemChunkTx, expandOptions.Transaction, encodingVersion)
 		if err != nil {
 			return fmt.Errorf("could not retrieve transaction result: %w", err)
 		}
@@ -270,13 +270,13 @@ func (b *AccountTransactionsBackend) getTransactionResult(
 	txID flow.Identifier,
 	header *flow.Header,
 	isSystemChunkTx bool,
-	expandOptions AccountTransactionExpandOptions,
+	expandTransaction bool,
 	encodingVersion entities.EventEncodingVersion,
 ) (*accessmodel.TransactionResult, error) {
 	// the system collection is not indexed and uses the zero ID by convention.
 	var collectionID flow.Identifier
 
-	if !isSystemChunkTx || !expandOptions.Transaction {
+	if !isSystemChunkTx {
 		collection, err := b.collections.LightByTransactionID(txID)
 		if err != nil {
 			if !errors.Is(err, storage.ErrNotFound) {
@@ -285,13 +285,15 @@ func (b *AccountTransactionsBackend) getTransactionResult(
 			// if we have already looked up the transaction and confirmed it is NOT a system chunk tx,
 			// then there should be an entry in the tx/collection index. however, the collection/tx
 			// index is built asynchronously with the extended indexer and may not be available yet.
-			if expandOptions.Transaction {
+			// return an error, but don't throw an irrecoverable error.
+			if expandTransaction {
 				return nil, fmt.Errorf("could not retrieve collection for standard transaction: %w", err)
 			}
-			// system chunk transactions are not indexed by collection, so they will not exist.
-			// if the collection is not found, then this is a system chunk tx.
+			// if the collection is not found and we're not expanding the transaction,
+			// proceed with zero collectionID.
+		} else {
+			collectionID = collection.ID()
 		}
-		collectionID = collection.ID()
 	}
 
 	result, err := b.transactionsProvider.TransactionResult(ctx, header, txID, collectionID, encodingVersion)
