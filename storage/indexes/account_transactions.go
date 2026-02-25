@@ -64,7 +64,7 @@ var _ storage.AccountTransactions = (*AccountTransactions)(nil)
 // Expected error returns during normal operations:
 //   - [storage.ErrNotBootstrapped] if the index has not been initialized
 func NewAccountTransactions(db storage.DB) (*AccountTransactions, error) {
-	firstHeight, err := accountTxHeightLookup(db.Reader(), keyAccountTransactionFirstHeightKey)
+	firstHeight, err := readHeight(db.Reader(), keyAccountTransactionFirstHeightKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, storage.ErrNotBootstrapped
@@ -72,7 +72,7 @@ func NewAccountTransactions(db storage.DB) (*AccountTransactions, error) {
 		return nil, fmt.Errorf("could not get first height: %w", err)
 	}
 
-	persistedLatestHeight, err := accountTxHeightLookup(db.Reader(), keyAccountTransactionLatestHeightKey)
+	persistedLatestHeight, err := readHeight(db.Reader(), keyAccountTransactionLatestHeightKey)
 	if err != nil {
 		// if `firstHeight` is set, then `latestHeight` must be set as well, otherwise the database
 		// is in a corrupted state.
@@ -91,8 +91,14 @@ func NewAccountTransactions(db storage.DB) (*AccountTransactions, error) {
 // The caller must hold the [storage.LockIndexAccountTransactions] lock until the batch is committed.
 //
 // Expected error returns during normal operations:
-//   - [storage.ErrAlreadyExists] if data is found for while initializing
-func BootstrapAccountTransactions(lctx lockctx.Proof, rw storage.ReaderBatchWriter, db storage.DB, initialStartHeight uint64, txData []access.AccountTransaction) (*AccountTransactions, error) {
+//   - [storage.ErrAlreadyExists] if any data is found while initializing
+func BootstrapAccountTransactions(
+	lctx lockctx.Proof,
+	rw storage.ReaderBatchWriter,
+	db storage.DB,
+	initialStartHeight uint64,
+	txData []access.AccountTransaction,
+) (*AccountTransactions, error) {
 	err := initialize(lctx, rw, initialStartHeight, txData)
 	if err != nil {
 		return nil, fmt.Errorf("could not bootstrap account transactions: %w", err)
@@ -115,44 +121,46 @@ func (idx *AccountTransactions) LatestIndexedHeight() uint64 {
 	return idx.latestHeight.Load()
 }
 
-// TransactionsByAddress retrieves transaction references for an account within the specified
-// block height range (inclusive). Results are returned in descending order (newest first).
+// TransactionsByAddress retrieves transaction references for an account using cursor-based pagination.
+// Results are returned in descending order (newest first).
 //
-// If `endHeight` is greater than the latest indexed height, the latest indexed height will be used.
+// `limit` specifies the maximum number of results to return per page.
+//
+// `cursor` is a pointer to an [access.AccountTransactionCursor]:
+//   - nil means start from the latest indexed height (first page)
+//   - non-nil means resume after the cursor position (subsequent pages)
+//
+// `filter` is an optional filter to apply to the results. If nil, all transactions will be returned.
+// The filter is applied before calculating the limit. For pagination, to work correctly, the same
+// filter must be applied to all pages.
 //
 // Expected error returns during normal operations:
-//   - [storage.ErrHeightNotIndexed] if the requested range extends beyond indexed heights
-//   - [storage.ErrInvalidQuery] if the query is invalid
+//   - [storage.ErrHeightNotIndexed] if the cursor height extends beyond indexed heights
+//   - [storage.ErrInvalidQuery] if the limit is invalid
 func (idx *AccountTransactions) TransactionsByAddress(
 	account flow.Address,
-	startHeight uint64,
-	endHeight uint64,
-) ([]access.AccountTransaction, error) {
+	limit uint32,
+	cursor *access.AccountTransactionCursor,
+	filter storage.IndexFilter[*access.AccountTransaction],
+) (access.AccountTransactionsPage, error) {
+	if err := validateLimit(limit); err != nil {
+		return access.AccountTransactionsPage{}, errors.Join(storage.ErrInvalidQuery, err)
+	}
+
 	latestHeight := idx.latestHeight.Load()
-	if startHeight > latestHeight {
-		return nil, fmt.Errorf("start height %d is greater than latest indexed height %d: %w",
-			startHeight, latestHeight, storage.ErrHeightNotIndexed)
+	if cursor != nil {
+		if err := validateCursorHeight(cursor.BlockHeight, idx.firstHeight, latestHeight); err != nil {
+			return access.AccountTransactionsPage{}, err
+		}
+		latestHeight = cursor.BlockHeight
 	}
 
-	if startHeight < idx.firstHeight {
-		return nil, fmt.Errorf("start height %d is before first indexed height %d: %w",
-			startHeight, idx.firstHeight, storage.ErrHeightNotIndexed)
-	}
-
-	if endHeight > latestHeight {
-		endHeight = latestHeight
-	}
-
-	if startHeight > endHeight {
-		return nil, fmt.Errorf("start height %d is greater than end height %d: %w", startHeight, endHeight, storage.ErrInvalidQuery)
-	}
-
-	results, err := lookupAccountTransactions(idx.db.Reader(), account, startHeight, endHeight)
+	page, err := lookupAccountTransactions(idx.db.Reader(), account, idx.firstHeight, latestHeight, limit, cursor, filter)
 	if err != nil {
-		return nil, fmt.Errorf("could not lookup account transactions: %w", err)
+		return access.AccountTransactionsPage{}, fmt.Errorf("could not lookup account transactions: %w", err)
 	}
 
-	return results, nil
+	return page, nil
 }
 
 // Store indexes all account-transaction associations for a block.
@@ -191,63 +199,112 @@ func (idx *AccountTransactions) Store(lctx lockctx.Proof, rw storage.ReaderBatch
 	return nil
 }
 
-// lookupAccountTransactions retrieves all account transactions for a given address within the specified
-// block height range (inclusive). Results are returned in descending order (newest first).
-// Returns an empty slice and no error if no transactions are found.
+// lookupAccountTransactions retrieves account transactions for a given address using cursor-based
+// pagination. Results are returned in descending order (newest first).
+//
+// If `cursor` is nil, iteration starts from latestHeight. If non-nil, iteration starts after the
+// cursor position (the entry at the exact cursor position is skipped).
+//
+// The function collects up to `limit` entries, then peeks one more to determine whether a
+// NextCursor should be set in the returned page.
+// `limit` must be in the exclusive range (0, math.MaxUint32).
 //
 // No error returns are expected during normal operation.
-func lookupAccountTransactions(reader storage.Reader, address flow.Address, startHeight uint64, endHeight uint64) ([]access.AccountTransaction, error) {
-	// TODO(peter): I will be revisiting this logic when implementing the API integration. instead
-	// of using a start/end height range, we'll use a pagination cursor and limit.
+func lookupAccountTransactions(
+	reader storage.Reader,
+	address flow.Address,
+	lowestHeight uint64,
+	highestHeight uint64,
+	limit uint32,
+	cursor *access.AccountTransactionCursor,
+	filter storage.IndexFilter[*access.AccountTransaction],
+) (access.AccountTransactionsPage, error) {
+	// Start from the latest height (prefix covers all tx indexes at that height).
+	startKey := makeAccountTxKeyPrefix(address, highestHeight)
 
-	// Create iterator bounds (inclusive)
-	// Lower bound: prefix + address + ~endHeight (one's complement makes this the lower bound for descending)
-	// Upper bound: prefix + address + ~startHeight
-	lowerBound := makeAccountTxKeyPrefix(address, endHeight)
-	upperBound := makeAccountTxKeyPrefix(address, startHeight)
+	// End bound: first indexed height (inclusive via prefix).
+	endKey := makeAccountTxKeyPrefix(address, lowestHeight)
 
-	var results []access.AccountTransaction
-	err := operation.IterateKeys(reader, lowerBound, upperBound,
+	// We fetch limit+1 to determine if there are more results beyond this page.
+	fetchLimit := limit + 1
+
+	var collected []access.AccountTransaction
+
+	err := operation.IterateKeys(reader, startKey, endKey,
 		func(keyCopy []byte, getValue func(any) error) (bail bool, err error) {
+			addr, height, txIndex, err := decodeAccountTxKey(keyCopy)
+			if err != nil {
+				return true, fmt.Errorf("could not decode key: %w", err)
+			}
+
+			// the cursor is the next entry to return. skip all entries before it.
+			if cursor != nil {
+				// heights are descending (stored as one's complement), and transaction indexes are ascending.
+				if height > cursor.BlockHeight {
+					return false, nil
+				}
+				if height == cursor.BlockHeight && txIndex < cursor.TransactionIndex {
+					return false, nil
+				}
+			}
+
 			var stored storedAccountTransaction
 			if err := getValue(&stored); err != nil {
 				return true, fmt.Errorf("could not unmarshal value: %w", err)
 			}
 
-			address, height, txIndex, err := decodeAccountTxKey(keyCopy)
-			if err != nil {
-				return true, fmt.Errorf("could not decode key: %w", err)
-			}
-
-			results = append(results, access.AccountTransaction{
-				Address:          address,
+			tx := access.AccountTransaction{
+				Address:          addr,
 				BlockHeight:      height,
 				TransactionID:    stored.TransactionID,
 				TransactionIndex: txIndex,
 				Roles:            stored.Roles,
-			})
+			}
+
+			if filter != nil && !filter(&tx) {
+				return false, nil
+			}
+
+			collected = append(collected, tx)
+
+			if uint32(len(collected)) >= fetchLimit {
+				return true, nil // bail after collecting enough
+			}
 
 			return false, nil
 		}, storage.DefaultIteratorOptions())
 
 	if err != nil {
-		return nil, fmt.Errorf("could not iterate keys: %w", err)
+		return access.AccountTransactionsPage{}, fmt.Errorf("could not iterate keys: %w", err)
 	}
 
-	return results, nil
+	if uint32(len(collected)) <= limit {
+		return access.AccountTransactionsPage{
+			Transactions: collected,
+		}, nil
+	}
+
+	// we fetched one extra entry to check if there are more results. use it as the next cursor.
+	nextEntry := collected[limit]
+	return access.AccountTransactionsPage{
+		Transactions: collected[:limit],
+		NextCursor: &access.AccountTransactionCursor{
+			BlockHeight:      nextEntry.BlockHeight,
+			TransactionIndex: nextEntry.TransactionIndex,
+		},
+	}, nil
 }
 
 // indexAccountTransactions indexes all account-transaction associations for a block.
 // The caller must hold the [storage.LockIndexAccountTransactions] lock until the batch is committed.
 //
-// Expected error returns during normal operations:
-//   - [storage.ErrAlreadyExists] if the block height is already indexed
+// No error returns are expected during normal operation.
 func indexAccountTransactions(lctx lockctx.Proof, rw storage.ReaderBatchWriter, blockHeight uint64, txData []access.AccountTransaction) error {
 	if !lctx.HoldsLock(storage.LockIndexAccountTransactions) {
 		return fmt.Errorf("missing required lock: %s", storage.LockIndexAccountTransactions)
 	}
 
-	latestHeight, err := accountTxHeightLookup(rw.GlobalReader(), keyAccountTransactionLatestHeightKey)
+	latestHeight, err := readHeight(rw.GlobalReader(), keyAccountTransactionLatestHeightKey)
 	if err != nil {
 		return fmt.Errorf("could not get latest indexed height: %w", err)
 	}
@@ -427,16 +484,4 @@ func decodeAccountTxKey(key []byte) (flow.Address, uint64, uint32, error) {
 	txIndex := binary.BigEndian.Uint32(key[offset:])
 
 	return address, height, txIndex, nil
-}
-
-// accountTxHeightLookup reads a height boundary (first/last) for the account transactions index from the database.
-//
-// Expected error returns during normal operations:
-//   - [storage.ErrNotFound] if the height is not found
-func accountTxHeightLookup(reader storage.Reader, key []byte) (uint64, error) {
-	var height uint64
-	if err := operation.RetrieveByKey(reader, key, &height); err != nil {
-		return 0, err
-	}
-	return height, nil
 }
