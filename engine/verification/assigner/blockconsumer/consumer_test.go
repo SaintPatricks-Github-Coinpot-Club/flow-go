@@ -77,18 +77,25 @@ func TestProduceConsume(t *testing.T) {
 		var processAll sync.WaitGroup
 		alwaysFinish := func(notifier module.ProcessingNotifier, block *flow.Block) {
 			lock.Lock()
-			defer lock.Unlock()
-
 			received = append(received, block)
+			lock.Unlock()
 
-			go func() {
-				notifier.Notify(block.ID())
-				processAll.Done()
-			}()
+			notifier.Notify(block.ID())
+			processAll.Done()
 		}
 
 		withConsumer(t, 100, 3, alwaysFinish, func(consumer *blockconsumer.BlockConsumer, blocks []*flow.Block, followerDistributor *pubsub.FollowerDistributor) {
 			unittest.RequireCloseBefore(t, consumer.Ready(), time.Second, "could not start consumer")
+			// Defer consumer shutdown so that all in-flight worker goroutines (which write to
+			// pebble) are drained before RunWithPebbleDB closes the database. Without this,
+			// a test timeout via RequireReturnsBefore causes runtime.Goexit to close pebble
+			// while workers are still writing, resulting in a "pebble: closed" panic.
+			// Note: consumer.Done() must be called inside the closure, not as a direct defer
+			// argument, since defer evaluates arguments immediately and consumer.Done() starts
+			// the shutdown goroutine.
+			defer func() {
+				unittest.RequireCloseBefore(t, consumer.Done(), time.Second, "could not terminate consumer")
+			}()
 			processAll.Add(len(blocks))
 
 			for i := 0; i < len(blocks); i++ {
@@ -100,7 +107,6 @@ func TestProduceConsume(t *testing.T) {
 
 			// waits until all blocks finish processing
 			unittest.RequireReturnsBefore(t, processAll.Wait, time.Second, "could not process all blocks on time")
-			unittest.RequireCloseBefore(t, consumer.Done(), time.Second, "could not terminate consumer")
 
 			// expects the mock engine receive all 100 blocks.
 			require.ElementsMatch(t, flow.GetIDs(blocks), flow.GetIDs(received))
