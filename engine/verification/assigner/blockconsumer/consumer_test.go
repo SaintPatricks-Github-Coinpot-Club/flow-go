@@ -86,13 +86,8 @@ func TestProduceConsume(t *testing.T) {
 
 		withConsumer(t, 100, 3, alwaysFinish, func(consumer *blockconsumer.BlockConsumer, blocks []*flow.Block, followerDistributor *pubsub.FollowerDistributor) {
 			unittest.RequireCloseBefore(t, consumer.Ready(), time.Second, "could not start consumer")
-			// Defer consumer shutdown so that all in-flight worker goroutines (which write to
-			// pebble) are drained before RunWithPebbleDB closes the database. Without this,
-			// a test timeout via RequireReturnsBefore causes runtime.Goexit to close pebble
-			// while workers are still writing, resulting in a "pebble: closed" panic.
-			// Note: consumer.Done() must be called inside the closure, not as a direct defer
-			// argument, since defer evaluates arguments immediately and consumer.Done() starts
-			// the shutdown goroutine.
+			// defer shutdown to ensure it runs even if a `unittest.Require*` fails.
+			// this helps avoid a "pebble: closed" panic when the test times out.
 			defer func() {
 				unittest.RequireCloseBefore(t, consumer.Done(), time.Second, "could not terminate consumer")
 			}()
