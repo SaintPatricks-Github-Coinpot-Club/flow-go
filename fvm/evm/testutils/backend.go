@@ -255,14 +255,8 @@ func getSimpleBlockStore(chain flow.ChainID, vs *TestValueStore, bi *TestBlockIn
 		StageBlockProposalFunc: func(_bp *types.BlockProposal) {
 			bs.StageBlockProposal(_bp)
 		},
-		FlushBlockProposalFunc: func() error {
-			return bs.FlushBlockProposal()
-		},
 		CommitBlockProposalFunc: func(_bp *types.BlockProposal) error {
 			return bs.CommitBlockProposal(_bp)
-		},
-		ResetBlockProposalFunc: func() {
-			bs.ResetBlockProposal()
 		},
 	}
 }
@@ -745,8 +739,6 @@ type TestBlockStore struct {
 	CommitBlockProposalFunc func(*types.BlockProposal) error
 	LatestBlockFunc         func() (*types.Block, error)
 	StageBlockProposalFunc  func(*types.BlockProposal)
-	FlushBlockProposalFunc  func() error
-	ResetBlockProposalFunc  func()
 }
 
 var _ environment.EVMBlockStore = &TestBlockStore{}
@@ -789,20 +781,4 @@ func (tb *TestBlockStore) StageBlockProposal(bp *types.BlockProposal) {
 		panic("StageBlockProposalFunc method is not set")
 	}
 	stageBlockProposalFunc(bp)
-}
-
-func (tb *TestBlockStore) FlushBlockProposal() error {
-	flushBlockProposalFunc := tb.FlushBlockProposalFunc
-	if flushBlockProposalFunc == nil {
-		panic("FlushBlockProposalFunc method is not set")
-	}
-	return flushBlockProposalFunc()
-}
-
-func (tb *TestBlockStore) ResetBlockProposal() {
-	resetFunc := tb.ResetBlockProposalFunc
-	if resetFunc == nil {
-		panic("ResetBlockProposalFunc method is not set")
-	}
-	resetFunc()
 }

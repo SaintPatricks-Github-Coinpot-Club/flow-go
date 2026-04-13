@@ -1504,50 +1504,6 @@ func (_c *Environment_Events_Call) RunAndReturn(run func() flow.EventsList) *Env
 	return _c
 }
 
-// FlushBlockProposal provides a mock function for the type Environment
-func (_mock *Environment) FlushBlockProposal() error {
-	ret := _mock.Called()
-
-	if len(ret) == 0 {
-		panic("no return value specified for FlushBlockProposal")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func() error); ok {
-		r0 = returnFunc()
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// Environment_FlushBlockProposal_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FlushBlockProposal'
-type Environment_FlushBlockProposal_Call struct {
-	*mock.Call
-}
-
-// FlushBlockProposal is a helper method to define mock.On call
-func (_e *Environment_Expecter) FlushBlockProposal() *Environment_FlushBlockProposal_Call {
-	return &Environment_FlushBlockProposal_Call{Call: _e.mock.On("FlushBlockProposal")}
-}
-
-func (_c *Environment_FlushBlockProposal_Call) Run(run func()) *Environment_FlushBlockProposal_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run()
-	})
-	return _c
-}
-
-func (_c *Environment_FlushBlockProposal_Call) Return(err error) *Environment_FlushBlockProposal_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *Environment_FlushBlockProposal_Call) RunAndReturn(run func() error) *Environment_FlushBlockProposal_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // FlushPendingUpdates provides a mock function for the type Environment
 func (_mock *Environment) FlushPendingUpdates() (environment.ContractUpdates, error) {
 	ret := _mock.Called()
@@ -3684,39 +3640,6 @@ func (_c *Environment_Reset_Call) Return() *Environment_Reset_Call {
 }
 
 func (_c *Environment_Reset_Call) RunAndReturn(run func()) *Environment_Reset_Call {
-	_c.Run(run)
-	return _c
-}
-
-// ResetBlockProposal provides a mock function for the type Environment
-func (_mock *Environment) ResetBlockProposal() {
-	_mock.Called()
-	return
-}
-
-// Environment_ResetBlockProposal_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ResetBlockProposal'
-type Environment_ResetBlockProposal_Call struct {
-	*mock.Call
-}
-
-// ResetBlockProposal is a helper method to define mock.On call
-func (_e *Environment_Expecter) ResetBlockProposal() *Environment_ResetBlockProposal_Call {
-	return &Environment_ResetBlockProposal_Call{Call: _e.mock.On("ResetBlockProposal")}
-}
-
-func (_c *Environment_ResetBlockProposal_Call) Run(run func()) *Environment_ResetBlockProposal_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run()
-	})
-	return _c
-}
-
-func (_c *Environment_ResetBlockProposal_Call) Return() *Environment_ResetBlockProposal_Call {
-	_c.Call.Return()
-	return _c
-}
-
-func (_c *Environment_ResetBlockProposal_Call) RunAndReturn(run func()) *Environment_ResetBlockProposal_Call {
 	_c.Run(run)
 	return _c
 }

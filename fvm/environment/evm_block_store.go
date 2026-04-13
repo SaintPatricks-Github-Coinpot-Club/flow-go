@@ -25,16 +25,8 @@ type EVMBlockStore interface {
 	// storage. Persistence happens at transaction end via FlushBlockProposal.
 	StageBlockProposal(*types.BlockProposal)
 
-	// FlushBlockProposal writes the cached block proposal to storage. Called by the
-	// fvm.Environment at the end of each Cadence transaction.
-	FlushBlockProposal() error
-
 	// CommitBlockProposal commits the block proposal and update the chain of blocks
 	CommitBlockProposal(*types.BlockProposal) error
-
-	// Reset discards any staged but unflushed block proposal. Called by the
-	// fvm.Environment when a transaction fails.
-	ResetBlockProposal()
 }
 
 const (
@@ -259,30 +251,3 @@ func (bs *BlockStore) FlushBlockProposal() error {
 	return nil
 }
 
-type NoEVMBlockStore struct{}
-
-var _ EVMBlockStore = &NoEVMBlockStore{}
-
-func (bs NoEVMBlockStore) BlockProposal() (*types.BlockProposal, error) {
-	return nil, nil
-}
-
-func (bs NoEVMBlockStore) CommitBlockProposal(bp *types.BlockProposal) error {
-	return nil
-}
-
-func (bs NoEVMBlockStore) LatestBlock() (*types.Block, error) {
-	return nil, nil
-}
-
-func (bs NoEVMBlockStore) BlockHash(height uint64) (gethCommon.Hash, error) {
-	return gethCommon.Hash{}, nil
-}
-
-func (bs NoEVMBlockStore) ResetBlockProposal() {}
-
-func (bs NoEVMBlockStore) StageBlockProposal(bp *types.BlockProposal) {}
-
-func (bs NoEVMBlockStore) FlushBlockProposal() error {
-	return nil
-}

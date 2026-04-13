@@ -255,14 +255,3 @@ func (we *WrappedEnvironment) LatestBlock() (*types.Block, error) {
 func (we *WrappedEnvironment) StageBlockProposal(bp *types.BlockProposal) {
 	we.env.StageBlockProposal(bp)
 }
-
-// FlushBlockProposal implements [Backend].
-func (we *WrappedEnvironment) FlushBlockProposal() error {
-	err := we.env.FlushBlockProposal()
-	return handleEnvironmentError(err)
-}
-
-// ResetBlockProposal implements [Backend].
-func (we *WrappedEnvironment) ResetBlockProposal() {
-	we.env.ResetBlockProposal()
-}

@@ -205,50 +205,6 @@ func (_c *EVMBlockStore_CommitBlockProposal_Call) RunAndReturn(run func(blockPro
 	return _c
 }
 
-// FlushBlockProposal provides a mock function for the type EVMBlockStore
-func (_mock *EVMBlockStore) FlushBlockProposal() error {
-	ret := _mock.Called()
-
-	if len(ret) == 0 {
-		panic("no return value specified for FlushBlockProposal")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func() error); ok {
-		r0 = returnFunc()
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// EVMBlockStore_FlushBlockProposal_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FlushBlockProposal'
-type EVMBlockStore_FlushBlockProposal_Call struct {
-	*mock.Call
-}
-
-// FlushBlockProposal is a helper method to define mock.On call
-func (_e *EVMBlockStore_Expecter) FlushBlockProposal() *EVMBlockStore_FlushBlockProposal_Call {
-	return &EVMBlockStore_FlushBlockProposal_Call{Call: _e.mock.On("FlushBlockProposal")}
-}
-
-func (_c *EVMBlockStore_FlushBlockProposal_Call) Run(run func()) *EVMBlockStore_FlushBlockProposal_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run()
-	})
-	return _c
-}
-
-func (_c *EVMBlockStore_FlushBlockProposal_Call) Return(err error) *EVMBlockStore_FlushBlockProposal_Call {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *EVMBlockStore_FlushBlockProposal_Call) RunAndReturn(run func() error) *EVMBlockStore_FlushBlockProposal_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // LatestBlock provides a mock function for the type EVMBlockStore
 func (_mock *EVMBlockStore) LatestBlock() (*types.Block, error) {
 	ret := _mock.Called()
@@ -301,39 +257,6 @@ func (_c *EVMBlockStore_LatestBlock_Call) Return(block *types.Block, err error) 
 
 func (_c *EVMBlockStore_LatestBlock_Call) RunAndReturn(run func() (*types.Block, error)) *EVMBlockStore_LatestBlock_Call {
 	_c.Call.Return(run)
-	return _c
-}
-
-// ResetBlockProposal provides a mock function for the type EVMBlockStore
-func (_mock *EVMBlockStore) ResetBlockProposal() {
-	_mock.Called()
-	return
-}
-
-// EVMBlockStore_ResetBlockProposal_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ResetBlockProposal'
-type EVMBlockStore_ResetBlockProposal_Call struct {
-	*mock.Call
-}
-
-// ResetBlockProposal is a helper method to define mock.On call
-func (_e *EVMBlockStore_Expecter) ResetBlockProposal() *EVMBlockStore_ResetBlockProposal_Call {
-	return &EVMBlockStore_ResetBlockProposal_Call{Call: _e.mock.On("ResetBlockProposal")}
-}
-
-func (_c *EVMBlockStore_ResetBlockProposal_Call) Run(run func()) *EVMBlockStore_ResetBlockProposal_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run()
-	})
-	return _c
-}
-
-func (_c *EVMBlockStore_ResetBlockProposal_Call) Return() *EVMBlockStore_ResetBlockProposal_Call {
-	_c.Call.Return()
-	return _c
-}
-
-func (_c *EVMBlockStore_ResetBlockProposal_Call) RunAndReturn(run func()) *EVMBlockStore_ResetBlockProposal_Call {
-	_c.Run(run)
 	return _c
 }
 
