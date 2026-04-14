@@ -98,6 +98,9 @@ func New(
 
 	// Note: logging interceptor should be last (innermost) to capture all messages.
 	// This adds debug level logs for both start and finish of each gRPC request.
+	// Example log messages for searching:
+	//   - Start:  DBG "started call" grpc.method=ExecuteScriptAtBlockID grpc.service=flow.execution.ExecutionAPI peer.address=...
+	//   - Finish: DBG "finished call" grpc.method=ExecuteScriptAtBlockID grpc.service=flow.execution.ExecutionAPI peer.address=... grpc.code=OK grpc.time_ms=...
 	interceptors = append(interceptors, grpcserver.LoggingInterceptor(log))
 
 	// create a chained unary interceptor

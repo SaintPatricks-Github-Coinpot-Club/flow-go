@@ -14,6 +14,10 @@ import (
 // LoggingInterceptor returns a grpc.UnaryServerInterceptor that logs incoming GRPC request and response.
 // It extracts the requester's peer address from the gRPC context and includes it in log entries.
 // Logs are emitted at the start and finish of each call for debugging and tracing purposes.
+//
+// Example log messages for searching:
+//   - Start:  DBG "started call" grpc.method=Ping grpc.service=flow.access.AccessAPI peer.address=...
+//   - Finish: DBG "finished call" grpc.method=Ping grpc.service=flow.access.AccessAPI peer.address=... grpc.code=OK grpc.time_ms=...
 func LoggingInterceptor(log zerolog.Logger) grpc.UnaryServerInterceptor {
 	return logging.UnaryServerInterceptor(
 		InterceptorLogger(log),
@@ -26,6 +30,10 @@ func LoggingInterceptor(log zerolog.Logger) grpc.UnaryServerInterceptor {
 // StreamLoggingInterceptor returns a grpc.StreamServerInterceptor that logs incoming streaming GRPC requests.
 // It extracts the requester's peer address from the gRPC context and includes it in log entries.
 // Logs are emitted at the start and finish of each streaming call for debugging and tracing purposes.
+//
+// Example log messages for searching:
+//   - Start:  DBG "started call" grpc.method=SubscribeEvents grpc.service=flow.executiondata.ExecutionDataAPI peer.address=...
+//   - Finish: DBG "finished call" grpc.method=SubscribeEvents grpc.service=flow.executiondata.ExecutionDataAPI peer.address=... grpc.code=OK grpc.time_ms=...
 func StreamLoggingInterceptor(log zerolog.Logger) grpc.StreamServerInterceptor {
 	return logging.StreamServerInterceptor(
 		InterceptorLogger(log),

@@ -13,6 +13,10 @@ import (
 
 // LoggingMiddleware creates a middleware which adds a logger interceptor to each request to log the request method, uri,
 // duration and response code. It logs at DEBUG level when the request starts and at INFO level when it finishes.
+//
+// Example log messages for searching:
+//   - Start:  DBG "started REST request" method=GET uri=/v1/blocks client_ip=... user_agent=...
+//   - Finish: INF "finished REST request" method=GET uri=/v1/blocks client_ip=... user_agent=... duration=... response_code=200
 func LoggingMiddleware(logger zerolog.Logger) mux.MiddlewareFunc {
 	return func(inner http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
