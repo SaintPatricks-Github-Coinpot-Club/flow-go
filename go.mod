@@ -50,8 +50,8 @@ require (
 	github.com/onflow/cadence v1.10.1
 	github.com/onflow/crypto v0.25.4
 	github.com/onflow/flow v0.4.20-0.20260303141511-b7c99b4fb01b
-	github.com/onflow/flow-core-contracts/lib/go/contracts v1.10.1
-	github.com/onflow/flow-core-contracts/lib/go/templates v1.10.1
+	github.com/onflow/flow-core-contracts/lib/go/contracts v1.10.2-0.20260414140227-4b8c6669b2a4
+	github.com/onflow/flow-core-contracts/lib/go/templates v1.10.2-0.20260414140227-4b8c6669b2a4
 	github.com/onflow/flow-go-sdk v1.10.1
 	github.com/onflow/flow/protobuf/go/flow v0.4.20
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
@@ -277,8 +277,8 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/onflow/fixed-point v0.1.1 // indirect
 	github.com/onflow/flow-ft/lib/go/contracts v1.1.0 // indirect
-	github.com/onflow/flow-ft/lib/go/templates v1.1.0 // indirect
-	github.com/onflow/flow-nft/lib/go/contracts v1.4.1 // indirect
+	github.com/onflow/flow-ft/lib/go/templates v1.1.1-0.20260414134002-e4ac36fb5b92 // indirect
+	github.com/onflow/flow-nft/lib/go/contracts v1.4.1
 	github.com/onflow/flow-nft/lib/go/templates v1.4.1 // indirect
 	github.com/onflow/sdks v0.6.0-preview.1 // indirect
 	github.com/onsi/ginkgo/v2 v2.22.0 // indirect
