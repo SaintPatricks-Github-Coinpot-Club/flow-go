@@ -8,14 +8,40 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 )
 
-// LoggingInterceptor returns a grpc.UnaryServerInterceptor that logs incoming GRPC request and response
+// LoggingInterceptor returns a grpc.UnaryServerInterceptor that logs incoming GRPC request and response.
+// It extracts the requester's peer address from the gRPC context and includes it in log entries.
+// Logs are emitted at the start and finish of each call for debugging and tracing purposes.
 func LoggingInterceptor(log zerolog.Logger) grpc.UnaryServerInterceptor {
 	return logging.UnaryServerInterceptor(
 		InterceptorLogger(log),
 		logging.WithLevels(statusCodeToLogLevel),
+		logging.WithFieldsFromContext(extractPeerFields),
+		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
 	)
+}
+
+// StreamLoggingInterceptor returns a grpc.StreamServerInterceptor that logs incoming streaming GRPC requests.
+// It extracts the requester's peer address from the gRPC context and includes it in log entries.
+// Logs are emitted at the start and finish of each streaming call for debugging and tracing purposes.
+func StreamLoggingInterceptor(log zerolog.Logger) grpc.StreamServerInterceptor {
+	return logging.StreamServerInterceptor(
+		InterceptorLogger(log),
+		logging.WithLevels(statusCodeToLogLevel),
+		logging.WithFieldsFromContext(extractPeerFields),
+		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
+	)
+}
+
+// extractPeerFields extracts peer information from the gRPC context and returns it as logging fields.
+// This includes the client's remote address for request tracing and debugging.
+func extractPeerFields(ctx context.Context) logging.Fields {
+	if p, ok := peer.FromContext(ctx); ok {
+		return logging.Fields{"peer.address", p.Addr.String()}
+	}
+	return nil
 }
 
 // InterceptorLogger adapts a zerolog.Logger to interceptor's logging.Logger
