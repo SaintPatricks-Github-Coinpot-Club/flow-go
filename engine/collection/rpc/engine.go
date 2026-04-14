@@ -81,6 +81,10 @@ func New(
 		interceptors = append(interceptors, rateLimitInterceptor)
 	}
 
+	// Note: logging interceptor should be last (innermost) to capture all messages.
+	// This adds debug level logs for both start and finish of each gRPC request.
+	interceptors = append(interceptors, grpcserver.LoggingInterceptor(log))
+
 	// create a chained unary interceptor
 	chainedInterceptors := grpc.ChainUnaryInterceptor(interceptors...)
 	grpcOpts = append(grpcOpts, chainedInterceptors)
