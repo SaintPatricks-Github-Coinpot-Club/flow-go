@@ -33,6 +33,7 @@ import (
 	bridge "github.com/onflow/flow-evm-bridge"
 	flowsdk "github.com/onflow/flow-go-sdk"
 	"github.com/onflow/flow-go-sdk/test"
+	nftcontracts "github.com/onflow/flow-nft/lib/go/contracts"
 
 	"github.com/onflow/flow-go/engine/execution/testutil"
 	exeUtils "github.com/onflow/flow-go/engine/execution/utils"
@@ -3369,30 +3370,32 @@ func TestVMBridge(t *testing.T) {
 			env := sc.AsTemplateEnv()
 
 			bridgeEnv := bridge.Environment{
-				CrossVMNFTAddress:                     env.ServiceAccountAddress,
-				CrossVMTokenAddress:                   env.ServiceAccountAddress,
-				FlowEVMBridgeHandlerInterfacesAddress: env.ServiceAccountAddress,
-				IBridgePermissionsAddress:             env.ServiceAccountAddress,
-				ICrossVMAddress:                       env.ServiceAccountAddress,
-				ICrossVMAssetAddress:                  env.ServiceAccountAddress,
-				IEVMBridgeNFTMinterAddress:            env.ServiceAccountAddress,
-				IEVMBridgeTokenMinterAddress:          env.ServiceAccountAddress,
-				IFlowEVMNFTBridgeAddress:              env.ServiceAccountAddress,
-				IFlowEVMTokenBridgeAddress:            env.ServiceAccountAddress,
-				FlowEVMBridgeAddress:                  env.ServiceAccountAddress,
-				FlowEVMBridgeAccessorAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeConfigAddress:            env.ServiceAccountAddress,
-				FlowEVMBridgeHandlersAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeNFTEscrowAddress:         env.ServiceAccountAddress,
-				FlowEVMBridgeResolverAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeTemplatesAddress:         env.ServiceAccountAddress,
-				FlowEVMBridgeTokenEscrowAddress:       env.ServiceAccountAddress,
-				FlowEVMBridgeUtilsAddress:             env.ServiceAccountAddress,
-				ArrayUtilsAddress:                     env.ServiceAccountAddress,
-				ScopedFTProvidersAddress:              env.ServiceAccountAddress,
-				SerializeAddress:                      env.ServiceAccountAddress,
-				SerializeMetadataAddress:              env.ServiceAccountAddress,
-				StringUtilsAddress:                    env.ServiceAccountAddress,
+				CrossVMNFTAddress:                          env.ServiceAccountAddress,
+				CrossVMTokenAddress:                        env.ServiceAccountAddress,
+				FlowEVMBridgeHandlerInterfacesAddress:      env.ServiceAccountAddress,
+				IBridgePermissionsAddress:                  env.ServiceAccountAddress,
+				ICrossVMAddress:                            env.ServiceAccountAddress,
+				ICrossVMAssetAddress:                       env.ServiceAccountAddress,
+				IEVMBridgeNFTMinterAddress:                 env.ServiceAccountAddress,
+				IEVMBridgeTokenMinterAddress:               env.ServiceAccountAddress,
+				IFlowEVMNFTBridgeAddress:                   env.ServiceAccountAddress,
+				IFlowEVMTokenBridgeAddress:                 env.ServiceAccountAddress,
+				FlowEVMBridgeAddress:                       env.ServiceAccountAddress,
+				FlowEVMBridgeAccessorAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeCustomAssociationTypesAddress: env.ServiceAccountAddress,
+				FlowEVMBridgeCustomAssociationsAddress:     env.ServiceAccountAddress,
+				FlowEVMBridgeConfigAddress:                 env.ServiceAccountAddress,
+				FlowEVMBridgeHandlersAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeNFTEscrowAddress:              env.ServiceAccountAddress,
+				FlowEVMBridgeResolverAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeTemplatesAddress:              env.ServiceAccountAddress,
+				FlowEVMBridgeTokenEscrowAddress:            env.ServiceAccountAddress,
+				FlowEVMBridgeUtilsAddress:                  env.ServiceAccountAddress,
+				ArrayUtilsAddress:                          env.ServiceAccountAddress,
+				ScopedFTProvidersAddress:                   env.ServiceAccountAddress,
+				SerializeAddress:                           env.ServiceAccountAddress,
+				SerializeMetadataAddress:                   env.ServiceAccountAddress,
+				StringUtilsAddress:                         env.ServiceAccountAddress,
 			}
 
 			// Create an account private key.
@@ -3611,30 +3614,32 @@ func TestVMBridge(t *testing.T) {
 			env := sc.AsTemplateEnv()
 
 			bridgeEnv := bridge.Environment{
-				CrossVMNFTAddress:                     env.ServiceAccountAddress,
-				CrossVMTokenAddress:                   env.ServiceAccountAddress,
-				FlowEVMBridgeHandlerInterfacesAddress: env.ServiceAccountAddress,
-				IBridgePermissionsAddress:             env.ServiceAccountAddress,
-				ICrossVMAddress:                       env.ServiceAccountAddress,
-				ICrossVMAssetAddress:                  env.ServiceAccountAddress,
-				IEVMBridgeNFTMinterAddress:            env.ServiceAccountAddress,
-				IEVMBridgeTokenMinterAddress:          env.ServiceAccountAddress,
-				IFlowEVMNFTBridgeAddress:              env.ServiceAccountAddress,
-				IFlowEVMTokenBridgeAddress:            env.ServiceAccountAddress,
-				FlowEVMBridgeAddress:                  env.ServiceAccountAddress,
-				FlowEVMBridgeAccessorAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeConfigAddress:            env.ServiceAccountAddress,
-				FlowEVMBridgeHandlersAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeNFTEscrowAddress:         env.ServiceAccountAddress,
-				FlowEVMBridgeResolverAddress:          env.ServiceAccountAddress,
-				FlowEVMBridgeTemplatesAddress:         env.ServiceAccountAddress,
-				FlowEVMBridgeTokenEscrowAddress:       env.ServiceAccountAddress,
-				FlowEVMBridgeUtilsAddress:             env.ServiceAccountAddress,
-				ArrayUtilsAddress:                     env.ServiceAccountAddress,
-				ScopedFTProvidersAddress:              env.ServiceAccountAddress,
-				SerializeAddress:                      env.ServiceAccountAddress,
-				SerializeMetadataAddress:              env.ServiceAccountAddress,
-				StringUtilsAddress:                    env.ServiceAccountAddress,
+				CrossVMNFTAddress:                          env.ServiceAccountAddress,
+				CrossVMTokenAddress:                        env.ServiceAccountAddress,
+				FlowEVMBridgeHandlerInterfacesAddress:      env.ServiceAccountAddress,
+				IBridgePermissionsAddress:                  env.ServiceAccountAddress,
+				ICrossVMAddress:                            env.ServiceAccountAddress,
+				ICrossVMAssetAddress:                       env.ServiceAccountAddress,
+				IEVMBridgeNFTMinterAddress:                 env.ServiceAccountAddress,
+				IEVMBridgeTokenMinterAddress:               env.ServiceAccountAddress,
+				IFlowEVMNFTBridgeAddress:                   env.ServiceAccountAddress,
+				IFlowEVMTokenBridgeAddress:                 env.ServiceAccountAddress,
+				FlowEVMBridgeAddress:                       env.ServiceAccountAddress,
+				FlowEVMBridgeAccessorAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeCustomAssociationTypesAddress: env.ServiceAccountAddress,
+				FlowEVMBridgeCustomAssociationsAddress:     env.ServiceAccountAddress,
+				FlowEVMBridgeConfigAddress:                 env.ServiceAccountAddress,
+				FlowEVMBridgeHandlersAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeNFTEscrowAddress:              env.ServiceAccountAddress,
+				FlowEVMBridgeResolverAddress:               env.ServiceAccountAddress,
+				FlowEVMBridgeTemplatesAddress:              env.ServiceAccountAddress,
+				FlowEVMBridgeTokenEscrowAddress:            env.ServiceAccountAddress,
+				FlowEVMBridgeUtilsAddress:                  env.ServiceAccountAddress,
+				ArrayUtilsAddress:                          env.ServiceAccountAddress,
+				ScopedFTProvidersAddress:                   env.ServiceAccountAddress,
+				SerializeAddress:                           env.ServiceAccountAddress,
+				SerializeMetadataAddress:                   env.ServiceAccountAddress,
+				StringUtilsAddress:                         env.ServiceAccountAddress,
 			}
 
 			// Create an account private key.
@@ -3668,8 +3673,13 @@ func TestVMBridge(t *testing.T) {
 
 			snapshotTree = snapshotTree.Append(executionSnapshot)
 
-			// Deploy the ExampleNFT contract
-			nftContract := contracts.ExampleNFT(env)
+			// Deploy the ExampleNFT contract (pre-CrossVM version, since
+			// this test exercises basic bridge onboarding without a pre-deployed EVM contract)
+			nftContract := nftcontracts.ExampleNFT(
+				flowsdk.HexToAddress(env.NonFungibleTokenAddress),
+				flowsdk.HexToAddress(env.MetadataViewsAddress),
+				flowsdk.HexToAddress(env.ViewResolverAddress),
+			)
 			nftContractName := "ExampleNFT"
 			txBodyBuilder = blueprints.DeployContractTransaction(
 				accounts[0],
@@ -3814,10 +3824,10 @@ func TestVMBridge(t *testing.T) {
 			id := cadence.UInt64(0)
 
 			for _, event := range output.Events {
-				if strings.Contains(string(event.Type), "Minted") {
+				if strings.Contains(string(event.Type), "Deposited") {
 					// decode the event payload
 					data, _ := ccf.Decode(nil, event.Payload)
-					// get the contractAddress field from the event
+					// get the id field from the event
 					id = cadence.SearchFieldByName(
 						data.(cadence.Event),
 						"id",
