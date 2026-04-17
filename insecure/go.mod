@@ -223,7 +223,7 @@ require (
 	github.com/onflow/flow-evm-bridge v0.2.1 // indirect
 	github.com/onflow/flow-ft/lib/go/contracts v1.1.1 // indirect
 	github.com/onflow/flow-ft/lib/go/templates v1.1.1 // indirect
-	github.com/onflow/flow-go-sdk v1.10.1 // indirect
+	github.com/onflow/flow-go-sdk v1.10.2 // indirect
 	github.com/onflow/flow-nft/lib/go/contracts v1.4.1 // indirect
 	github.com/onflow/flow-nft/lib/go/templates v1.4.1 // indirect
 	github.com/onflow/flow/protobuf/go/flow v0.4.20 // indirect
