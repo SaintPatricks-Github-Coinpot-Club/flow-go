@@ -14,6 +14,7 @@ import (
 // LoggingInterceptor returns a grpc.UnaryServerInterceptor that logs incoming GRPC request and response.
 // It extracts the requester's peer address from the gRPC context and includes it in log entries.
 // Logs are emitted at the start and finish of each call for debugging and tracing purposes.
+// Both start and finish logs are at debug level.
 //
 // Example log messages for searching:
 //   - Start:  DBG "started call" grpc.method=Ping grpc.service=flow.access.AccessAPI peer.address=...
@@ -30,6 +31,7 @@ func LoggingInterceptor(log zerolog.Logger) grpc.UnaryServerInterceptor {
 // StreamLoggingInterceptor returns a grpc.StreamServerInterceptor that logs incoming streaming GRPC requests.
 // It extracts the requester's peer address from the gRPC context and includes it in log entries.
 // Logs are emitted at the start and finish of each streaming call for debugging and tracing purposes.
+// Both start and finish logs are at debug level.
 //
 // Example log messages for searching:
 //   - Start:  DBG "started call" grpc.method=SubscribeEvents grpc.service=flow.executiondata.ExecutionDataAPI peer.address=...
@@ -73,16 +75,8 @@ func InterceptorLogger(l zerolog.Logger) logging.Logger {
 	})
 }
 
-// statusCodeToLogLevel converts a grpc status.Code to the appropriate logging.Level
-func statusCodeToLogLevel(c codes.Code) logging.Level {
-	switch c {
-	case codes.OK:
-		// log successful returns as Debug to avoid excessive logging in info mode
-		return logging.LevelDebug
-	case codes.DeadlineExceeded, codes.ResourceExhausted, codes.OutOfRange:
-		// these are common, map to info
-		return logging.LevelInfo
-	default:
-		return logging.DefaultServerCodeToLevel(c)
-	}
+// statusCodeToLogLevel converts a grpc status.Code to the appropriate logging.Level.
+// All status codes are logged at debug level to avoid excessive logging.
+func statusCodeToLogLevel(_ codes.Code) logging.Level {
+	return logging.LevelDebug
 }

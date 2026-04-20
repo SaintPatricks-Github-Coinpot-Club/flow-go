@@ -82,7 +82,7 @@ func New(
 	}
 
 	// Note: logging interceptor should be last (innermost) to capture all messages.
-	// This adds debug level logs for both start and finish of each gRPC request.
+	// Both start and finish logs are at debug level.
 	// Example log messages for searching:
 	//   - Start:  DBG "started call" grpc.method=SendTransaction grpc.service=flow.access.AccessAPI peer.address=...
 	//   - Finish: DBG "finished call" grpc.method=SendTransaction grpc.service=flow.access.AccessAPI peer.address=... grpc.code=OK grpc.time_ms=...
