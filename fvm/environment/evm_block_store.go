@@ -35,6 +35,50 @@ const (
 	BlockStoreLatestBlockProposalKey = "LatestBlockProposal"
 )
 
+// BlockStore manages EVM block storage and block proposal lifecycle during Flow block execution.
+//
+// Storage Keys:
+//   - LatestBlock: The last finalized EVM block. Updated only at CommitBlockProposal().
+//   - LatestBlockProposal: The in-progress EVM block accumulating transactions.
+//     Its parent hash must equal hash(LatestBlock) and height must equal LatestBlock.Height + 1.
+//
+// Each Cadence transaction creates a new BlockStore instance with an empty cache.
+// The cache avoids repeated storage reads within a single Cadence transaction.
+//
+// Flow Block K Execution:
+//
+//	├── Cadence tx 1 (succeed)
+//	│   ├── EVM Tx A
+//	│   │   ├── BlockProposal()
+//	│   │   │   ├── cache miss
+//	│   │   │   ├── read LatestBlockProposal from storage
+//	│   │   │   │   └── (if empty) read LatestBlock from storage (for parent hash, height)
+//	│   │   │   └── cache it
+//	│   │   └── StageBlockProposal()  → update cache
+//	│   ├── EVM Tx B
+//	│   │   ├── BlockProposal()       → cache hit
+//	│   │   └── StageBlockProposal()  → update cache
+//	│   └── [tx end]
+//	│       └── FlushBlockProposal()  → write LatestBlockProposal, cache = nil
+//	│
+//	├── Cadence tx 2 (failed)
+//	│   ├── EVM Tx C
+//	│   │   ├── BlockProposal()
+//	│   │   │   ├── cache miss
+//	│   │   │   └── read LatestBlockProposal from storage → cache it
+//	│   │   └── StageBlockProposal()  → update cache
+//	│   ├── EVM Tx D
+//	│   │   ├── BlockProposal()       → cache hit
+//	│   │   └── StageBlockProposal()  → update cache
+//	│   └── [tx fail/revert]
+//	│       └── Reset()               → cache = nil, storage unchanged
+//	│
+//	└── System chunk tx (last)
+//	    └── heartbeat()
+//	        └── CommitBlockProposal()
+//	            ├── write LatestBlock
+//	            ├── remove LatestBlockProposal (new proposal constructed lazily in next flow block)
+//	            └── cache = nil
 type BlockStore struct {
 	chainID     flow.ChainID
 	storage     ValueStore
@@ -178,16 +222,17 @@ func (bs *BlockStore) CommitBlockProposal(bp *types.BlockProposal) error {
 		return err
 	}
 
-	// construct a new block proposal and store
-	newBP, err := bs.constructBlockProposal()
+	// Remove LatestBlockProposal key - the new proposal will be constructed lazily
+	// on the next BlockProposal() call by reading LatestBlock for parent hash and height.
+	err = bs.storage.SetValue(
+		bs.rootAddress[:],
+		[]byte(BlockStoreLatestBlockProposalKey),
+		nil, // setting to nil removes the key
+	)
 	if err != nil {
 		return err
 	}
-	err = bs.updateBlockProposal(newBP)
-	if err != nil {
-		return err
-	}
-	bs.cached = newBP
+	bs.cached = nil
 	return nil
 }
 
