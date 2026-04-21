@@ -42,9 +42,9 @@ func TestBlockStoreLifecycle(t *testing.T) {
 			// TotalSupply changes for each EVM tx - also using distinct digit positions
 			// TotalSupply represents native token deposited in EVM (can increase via deposits)
 			var (
-				evmTxASupply = big.NewInt(100)     // ones place (x100)
-				evmTxBSupply = big.NewInt(2000)    // tens place (x100)
-				evmTxESupply = big.NewInt(5000000) // ten-thousands place (x100)
+				evmTxASupply = big.NewInt(100)      // ones place (x100)
+				evmTxBSupply = big.NewInt(2000)     // tens place (x100)
+				evmTxESupply = big.NewInt(5000000)  // ten-thousands place (x100)
 				evmTxFSupply = big.NewInt(60000000) // hundred-thousands place (x100)
 			)
 
@@ -82,10 +82,10 @@ func TestBlockStoreLifecycle(t *testing.T) {
 			// EVM Tx B: BlockProposal() - cache hit (same BlockStore instance)
 			bpB, err := bs1.BlockProposal()
 			require.NoError(t, err)
-			require.Equal(t, bpA, bpB) // same pointer, cache hit
-			require.Equal(t, uint64(1), bpB.TotalGasUsed)       // sees Tx A's gas
-			require.Equal(t, big.NewInt(100), bpB.TotalSupply)  // sees Tx A's supply
-			require.Equal(t, prevRandaoBlockK, bpB.PrevRandao)  // PrevRandao unchanged within block
+			require.Equal(t, bpA, bpB)                         // same pointer, cache hit
+			require.Equal(t, uint64(1), bpB.TotalGasUsed)      // sees Tx A's gas
+			require.Equal(t, big.NewInt(100), bpB.TotalSupply) // sees Tx A's supply
+			require.Equal(t, prevRandaoBlockK, bpB.PrevRandao) // PrevRandao unchanged within block
 
 			// EVM Tx B: StageBlockProposal() - update cache (accumulate gas and supply)
 			bpB.TotalGasUsed += evmTxBGas
@@ -199,9 +199,9 @@ func TestBlockStoreLifecycle(t *testing.T) {
 			// EVM Tx F: BlockProposal() - cache hit
 			bpF, err := bsK1.BlockProposal()
 			require.NoError(t, err)
-			require.Equal(t, uint64(50000), bpF.TotalGasUsed)        // sees Tx E's gas
-			require.Equal(t, big.NewInt(5002100), bpF.TotalSupply)   // 2100 + 5000000
-			require.Equal(t, prevRandaoBlockK1, bpF.PrevRandao)      // PrevRandao unchanged within block
+			require.Equal(t, uint64(50000), bpF.TotalGasUsed)      // sees Tx E's gas
+			require.Equal(t, big.NewInt(5002100), bpF.TotalSupply) // 2100 + 5000000
+			require.Equal(t, prevRandaoBlockK1, bpF.PrevRandao)    // PrevRandao unchanged within block
 
 			// EVM Tx F: StageBlockProposal() - update cache (accumulate gas and supply)
 			bpF.TotalGasUsed += evmTxFGas
@@ -220,7 +220,7 @@ func TestBlockStoreLifecycle(t *testing.T) {
 			bsSystemK1 := environment.NewBlockStore(chainID, backend, backend, backend, root)
 			bpCommitK1, err := bsSystemK1.BlockProposal()
 			require.NoError(t, err)
-			require.Equal(t, uint64(650000), bpCommitK1.TotalGasUsed)     // E+F = 650000
+			require.Equal(t, uint64(650000), bpCommitK1.TotalGasUsed)      // E+F = 650000
 			require.Equal(t, big.NewInt(65002100), bpCommitK1.TotalSupply) // accumulated supply
 
 			err = bsSystemK1.CommitBlockProposal(bpCommitK1)
