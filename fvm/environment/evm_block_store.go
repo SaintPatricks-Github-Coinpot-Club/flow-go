@@ -295,4 +295,3 @@ func (bs *BlockStore) FlushBlockProposal() error {
 	}
 	return nil
 }
-
