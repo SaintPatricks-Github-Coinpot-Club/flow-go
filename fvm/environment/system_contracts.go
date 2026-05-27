@@ -251,10 +251,9 @@ func (sys *SystemContracts) AccountsStorageCapacity(
 			LocationName:     systemcontracts.ContractNameStorageFees,
 			FunctionName:     systemcontracts.ContractStorageFeesFunction_getAccountsCapacityForTransactionStorageCheck,
 			ArgumentTypes: []sema.Type{
-				sema.NewConstantSizedType(
+				sema.NewVariableSizedType(
 					nil,
 					&sema.AddressType{},
-					int64(len(arrayValues)),
 				),
 				&sema.AddressType{},
 				sema.UFix64Type,
