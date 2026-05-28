@@ -169,7 +169,7 @@ var accountAvailableBalanceSpec = ContractFunctionSpec{
 	LocationName:     systemcontracts.ContractNameStorageFees,
 	FunctionName:     systemcontracts.ContractStorageFeesFunction_defaultTokenAvailableBalance,
 	ArgumentTypes: []sema.Type{
-		&sema.AddressType{},
+		sema.TheAddressType,
 	},
 }
 
@@ -217,7 +217,7 @@ var accountStorageCapacitySpec = ContractFunctionSpec{
 	LocationName:     systemcontracts.ContractNameStorageFees,
 	FunctionName:     systemcontracts.ContractStorageFeesFunction_calculateAccountCapacity,
 	ArgumentTypes: []sema.Type{
-		&sema.AddressType{},
+		sema.TheAddressType,
 	},
 }
 
@@ -253,9 +253,9 @@ func (sys *SystemContracts) AccountsStorageCapacity(
 			ArgumentTypes: []sema.Type{
 				sema.NewVariableSizedType(
 					nil,
-					&sema.AddressType{},
+					sema.TheAddressType,
 				),
-				&sema.AddressType{},
+				sema.TheAddressType,
 				sema.UFix64Type,
 			},
 		},
