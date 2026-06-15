@@ -4711,29 +4711,28 @@ func TestFlowTokenChangesInspector(t *testing.T) {
 	}
 }
 
-// TestTokenInspectorCreateAndFundNewAccount reproduces the token-inspector flag raised by
-// mainnet tx c5f3d77c1b86a9b4ce36e214278aca695702f26bd00e6c93b01d88f706456597, which reported
+// TestTokenInspectorCreateAndFundNewAccount is a regression test for the account-creation
+// storage-sharing fix. It is derived from mainnet tx
+// c5f3d77c1b86a9b4ce36e214278aca695702f26bd00e6c93b01d88f706456597, which historically reported
 // +0.001 FLOW (the account-creation minimum storage reservation,
 // [fvm.DefaultMinimumStorageReservation]) as unaccounted.
 //
-// The flagged transaction creates a new account and, in the same transaction, funds it by
-// withdrawing through a FlowToken vault reference that is borrowed BEFORE `Account(payer:)`.
-// This ordering is the cause of the discrepancy:
-//   - `Account(payer:)` deducts the 0.001 storage reservation from the payer's stored vault
-//     via the system-contract account-setup invocation (a separate Cadence runtime invocation).
-//   - The pre-borrowed reference still holds the vault as it was before that deduction. When the
-//     subsequent `withdraw` through that reference is committed, the stale value overwrites the
-//     reservation deduction, so the payer is never charged the 0.001.
+// The transaction creates a new account and, in the same transaction, funds it by withdrawing
+// through a FlowToken vault reference. Previously, `Account(payer:)` ran the system-contract
+// account-setup function in a SEPARATE Cadence runtime with its own storage, so the 0.001 storage
+// reservation it deducted from the payer's stored vault lived in a different atree cache than the
+// outer transaction's. If the vault reference was borrowed BEFORE `Account(payer:)`, the stale,
+// pre-deduction value overwrote the reservation deduction on commit, so the payer was never charged
+// the 0.001 and that FLOW was created with no corresponding `TokensMinted` event — which the token
+// inspector correctly flagged as unaccounted.
 //
-// The net effect is that 0.001 FLOW is created without a corresponding `TokensMinted` event, which
-// the token inspector correctly reports as unaccounted. This is therefore NOT a token-inspector
-// false positive: the inspector is faithfully reporting a real, unaccounted balance increase.
+// The fix runs the account-setup function against the SAME Cadence invocation context (and thus the
+// same storage) as the outer transaction. The deduction is now applied to the same in-memory vault
+// the outer reference points at, so the payer is charged the reservation regardless of borrow
+// ordering, and no FLOW is created unaccounted.
 //
-// The test asserts both:
-//   - the buggy ordering (borrow before create) under-charges the payer by 0.001 and the inspector
-//     flags +0.001, and
-//   - the safe ordering (borrow after create) charges the payer fully and the inspector reports
-//     nothing unaccounted.
+// The test asserts that BOTH orderings now behave identically: the payer is charged the funding plus
+// the reservation, and the inspector reports nothing unaccounted.
 func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 	chain := flow.Emulator.Chain()
 	sc := systemcontracts.SystemContractsForChain(chain.ChainID())
@@ -4794,8 +4793,8 @@ func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 		{
 			name:                "borrow before create (mainnet pattern)",
 			borrowBeforeCreate:  true,
-			expectedUnaccounted: reservation,
-			expectedPayerDebit:  funding, // reservation is NOT charged: it is created instead
+			expectedUnaccounted: 0,
+			expectedPayerDebit:  funding + reservation,
 		},
 		{
 			name:                "borrow after create (safe ordering)",
