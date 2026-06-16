@@ -4875,7 +4875,7 @@ func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 				require.NoError(t, err)
 
 				differ := inspection.NewTokenChangesInspector(
-					inspection.DefaultTokenDiffSearchTokens(chain), chain.ChainID())
+					inspection.DefaultTokenDiffSearchTokens(chain, true), chain.ChainID())
 				inspectCtx := fvm.NewContextFromParent(ctx, fvm.WithInspectors([]inspection.Inspector{differ}))
 
 				payerBefore := balanceOf(snapshotTree, payer)
