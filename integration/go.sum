@@ -752,8 +752,8 @@ github.com/onflow/atree-internal v0.16.1-rc.2 h1:FxY+wBFuFKh3cAsN+B0mrdRBVljcE2n
 github.com/onflow/atree-internal v0.16.1-rc.2/go.mod h1:hiOT/vKK/Zyw34Ru9OFbfEemC5NnQ7SHFB43bN9/4qI=
 github.com/onflow/boxo v0.0.0-20240201202436-f2477b92f483 h1:LpiQhTAfM9CAmNVEs0n//cBBgCg+vJSiIxTHYUklZ84=
 github.com/onflow/boxo v0.0.0-20240201202436-f2477b92f483/go.mod h1:pIZgTWdm3k3pLF9Uq6MB8JEcW07UDwNJjlXW1HELW80=
-github.com/onflow/cadence-internal v1.10.4-rc.5.0.20260615205355-6268347bc239 h1:N82Sahdf2+AeiEpATOJGZpN3HnMQTtnFHT5jmE7WA4I=
-github.com/onflow/cadence-internal v1.10.4-rc.5.0.20260615205355-6268347bc239/go.mod h1:11Fdkd6g02cKkauxULZtETO3BrZZTqJ3klCprzh8rPE=
+github.com/onflow/cadence-internal v1.10.4-rc.6 h1:ErinE6IqoN1skux5TsfdAcAD+jtbAjwxix5yoqrXPOs=
+github.com/onflow/cadence-internal v1.10.4-rc.6/go.mod h1:11Fdkd6g02cKkauxULZtETO3BrZZTqJ3klCprzh8rPE=
 github.com/onflow/crypto v0.25.4 h1:R615PWPdSoA5RATNb/j3cYaloBIZlSXVNgS7BjwHiwM=
 github.com/onflow/crypto v0.25.4/go.mod h1:DlkW/1SPUvLHYvUcjWa9PkLIRgSBKR4EDc3i+ATQKW4=
 github.com/onflow/fixed-point v0.1.1 h1:j0jYZVO8VGyk1476alGudEg7XqCkeTVxb5ElRJRKS90=
