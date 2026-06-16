@@ -52,7 +52,7 @@ func NewParseRestrictedAccountCreator(
 
 func (creator ParseRestrictedAccountCreator) CreateAccount(
 	runtimePayer common.Address,
-	context interpreter.InvocationContext,
+	invocationContext interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
@@ -62,7 +62,7 @@ func (creator ParseRestrictedAccountCreator) CreateAccount(
 		trace.FVMEnvCreateAccount,
 		creator.impl.CreateAccount,
 		runtimePayer,
-		context,
+		invocationContext,
 	)
 }
 
@@ -73,7 +73,7 @@ type AccountCreator interface {
 	// (the one that invoked the `Account` constructor).
 	CreateAccount(
 		runtimePayer common.Address,
-		context interpreter.InvocationContext,
+		invocationContext interpreter.InvocationContext,
 	) (common.Address, error)
 }
 
@@ -81,8 +81,8 @@ type NoAccountCreator struct {
 }
 
 func (NoAccountCreator) CreateAccount(
-	runtimePayer common.Address,
-	context interpreter.InvocationContext,
+	_ common.Address,
+	_ interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
@@ -262,8 +262,8 @@ func (creator *accountCreator) CreateBootstrapAccount(
 }
 
 func (creator *accountCreator) CreateAccount(
-	runtimePayer common.Address,
-	context interpreter.InvocationContext,
+	payer common.Address,
+	invocationContext interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
@@ -283,7 +283,10 @@ func (creator *accountCreator) CreateAccount(
 	// don't enforce limit during account creation
 	var address flow.Address
 	creator.txnState.RunWithMeteringDisabled(func() {
-		address, err = creator.createAccount(flow.Address(runtimePayer), context)
+		address, err = creator.createAccount(
+			flow.Address(payer),
+			invocationContext,
+		)
 	})
 
 	return common.Address(address), err
@@ -291,7 +294,7 @@ func (creator *accountCreator) CreateAccount(
 
 func (creator *accountCreator) createAccount(
 	payer flow.Address,
-	context interpreter.InvocationContext,
+	invocationContext interpreter.InvocationContext,
 ) (
 	flow.Address,
 	error,
@@ -320,7 +323,7 @@ func (creator *accountCreator) createAccount(
 		}
 
 		_, invokeErr := runtime.InvokeContractFunctionOnContext(
-			context,
+			invocationContext,
 			contractLocation,
 			systemcontracts.ContractServiceAccountFunction_setupNewAccount,
 			args,
