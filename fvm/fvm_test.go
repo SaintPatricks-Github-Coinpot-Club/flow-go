@@ -4712,31 +4712,19 @@ func TestFlowTokenChangesInspector(t *testing.T) {
 }
 
 // TestTokenInspectorCreateAndFundNewAccount is a regression test for the account-creation
-// storage-sharing fix. It is derived from mainnet tx
-// c5f3d77c1b86a9b4ce36e214278aca695702f26bd00e6c93b01d88f706456597, which historically reported
-// +0.001 FLOW (the account-creation minimum storage reservation,
-// [fvm.DefaultMinimumStorageReservation]) as unaccounted.
+// storage-sharing fix, derived from mainnet tx
+// c5f3d77c1b86a9b4ce36e214278aca695702f26bd00e6c93b01d88f706456597.
 //
-// The transaction creates a new account and, in the same transaction, funds it by withdrawing
-// through a FlowToken vault reference. Previously, `Account(payer:)` ran the system-contract
-// account-setup function in a SEPARATE Cadence runtime with its own storage, so the 0.001 storage
-// reservation it deducted from the payer's stored vault lived in a different atree cache than the
-// outer transaction's. If the vault reference was borrowed BEFORE `Account(payer:)`, the stale,
-// pre-deduction value overwrote the reservation deduction on commit, so the payer was never charged
-// the 0.001 and that FLOW was created with no corresponding `TokensMinted` event — which the token
-// inspector correctly flagged as unaccounted.
+// Creating and funding a new account in one transaction used to run `Account(payer:)`'s setup in
+// separate Cadence storage. When the payer's vault was borrowed before `Account(payer:)`, its stale
+// balance overwrote the 0.001 FLOW reservation deduction on commit, creating FLOW with no
+// `TokensMinted` event, which the inspector flagged as unaccounted.
 //
-// The fix runs the account-setup function against the SAME Cadence invocation context (and thus the
-// same storage) as the outer transaction. The deduction is now applied to the same in-memory vault
-// the outer reference points at, so the payer is charged the reservation regardless of borrow
-// ordering, and no FLOW is created unaccounted.
-//
-// The test asserts that BOTH orderings now behave identically: the payer is charged the funding plus
-// the reservation, and the inspector reports nothing unaccounted.
+// The test asserts that both borrow orderings now charge the payer the funding plus the reservation
+// and leave nothing unaccounted.
 func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 	chain := flow.Emulator.Chain()
 	sc := systemcontracts.SystemContractsForChain(chain.ChainID())
-	flowTokenVaultID := fmt.Sprintf("A.%s.FlowToken.Vault", sc.FlowToken.Address.Hex())
 
 	feesDeductedEventID := fmt.Sprintf("A.%s.FlowFees.FeesDeducted", sc.FlowFees.Address.Hex())
 
@@ -4744,8 +4732,9 @@ func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 	reservation := uint64(fvm.DefaultMinimumStorageReservation) // 0.001 FLOW
 	const funding = uint64(50_000_000)                          // 0.5 FLOW deposited into the new account
 
-	// borrowBeforeCreate produces the mainnet (buggy) ordering, borrowing the payer vault
-	// reference before `Account(payer:)`. borrowAfterCreate is the safe ordering.
+	// borrowBeforeCreate borrows the payer's vault before `Account(payer:)` — the mainnet
+	// ordering that originally exposed the lost-reservation bug.
+	// Both orderings must now be safe.
 	makeScript := func(borrowBeforeCreate bool) string {
 		borrow := `
 				let flowVaultRef = acct.storage
@@ -4779,28 +4768,24 @@ func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 		)
 	}
 
+	// expectedPayerDebit is the FlowToken amount the payer's balance should drop by (excluding
+	// transaction fees, which are deducted from the same account): the funding plus the reservation,
+	// regardless of borrow ordering.
+	expectedPayerDebit := funding + reservation
+
 	type testCase struct {
 		name               string
 		borrowBeforeCreate bool
-		// expectedUnaccounted is the FlowToken amount the inspector should report as unaccounted.
-		expectedUnaccounted uint64
-		// expectedPayerDebit is the FlowToken amount the payer's balance should drop by, excluding
-		// transaction fees (which are deducted from the same account).
-		expectedPayerDebit uint64
 	}
 
 	testCases := []testCase{
 		{
-			name:                "borrow before create (mainnet pattern)",
-			borrowBeforeCreate:  true,
-			expectedUnaccounted: 0,
-			expectedPayerDebit:  funding + reservation,
+			name:               "borrow before create (mainnet pattern)",
+			borrowBeforeCreate: true,
 		},
 		{
-			name:                "borrow after create (safe ordering)",
-			borrowBeforeCreate:  false,
-			expectedUnaccounted: 0,
-			expectedPayerDebit:  funding + reservation,
+			name:               "borrow after create",
+			borrowBeforeCreate: false,
 		},
 	}
 
@@ -4894,19 +4879,12 @@ func TestTokenInspectorCreateAndFundNewAccount(t *testing.T) {
 					}
 				}
 				payerDebit := payerBefore - payerAfter
-				require.Equal(t, tc.expectedPayerDebit+txFee, payerDebit,
+				require.Equal(t, expectedPayerDebit+txFee, payerDebit,
 					"payer balance change should equal expected debit plus the transaction fee")
 
 				require.Len(t, output.InspectionResults, 1, "expected one inspection result")
 				result := output.InspectionResults[0].(inspection.TokenDiffResult)
-				unaccounted := result.UnaccountedTokens()
-
-				if tc.expectedUnaccounted == 0 {
-					require.Empty(t, unaccounted, "all token movements should be accounted for")
-				} else {
-					require.Equal(t, int64(tc.expectedUnaccounted), unaccounted[flowTokenVaultID],
-						"inspector should report the uncharged reservation as unaccounted FlowToken")
-				}
+				require.Empty(t, result.UnaccountedTokens(), "all token movements should be accounted for")
 			}))
 	}
 }
