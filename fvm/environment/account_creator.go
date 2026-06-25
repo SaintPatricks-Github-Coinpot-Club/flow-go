@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/onflow/cadence/common"
+	"github.com/onflow/cadence/interpreter"
 
 	"github.com/onflow/flow-go/fvm/errors"
 	"github.com/onflow/flow-go/fvm/storage/state"
@@ -47,26 +48,32 @@ func NewParseRestrictedAccountCreator(
 
 func (creator ParseRestrictedAccountCreator) CreateAccount(
 	runtimePayer common.Address,
+	invocationContext interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
 ) {
-	return parseRestrict1Arg1Ret(
+	return parseRestrict2Arg1Ret(
 		creator.txnState,
 		trace.FVMEnvCreateAccount,
 		creator.impl.CreateAccount,
-		runtimePayer)
+		runtimePayer,
+		invocationContext)
 }
 
 type AccountCreator interface {
-	CreateAccount(runtimePayer common.Address) (common.Address, error)
+	CreateAccount(
+		runtimePayer common.Address,
+		invocationContext interpreter.InvocationContext,
+	) (common.Address, error)
 }
 
 type NoAccountCreator struct {
 }
 
 func (NoAccountCreator) CreateAccount(
-	runtimePayer common.Address,
+	_ common.Address,
+	_ interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
@@ -247,6 +254,7 @@ func (creator *accountCreator) CreateBootstrapAccount(
 
 func (creator *accountCreator) CreateAccount(
 	runtimePayer common.Address,
+	invocationContext interpreter.InvocationContext,
 ) (
 	common.Address,
 	error,
@@ -266,7 +274,10 @@ func (creator *accountCreator) CreateAccount(
 	// don't enforce limit during account creation
 	var address flow.Address
 	creator.txnState.RunWithMeteringDisabled(func() {
-		address, err = creator.createAccount(flow.Address(runtimePayer))
+		address, err = creator.createAccount(
+			flow.Address(runtimePayer),
+			invocationContext,
+		)
 	})
 
 	return common.Address(address), err
@@ -274,6 +285,7 @@ func (creator *accountCreator) CreateAccount(
 
 func (creator *accountCreator) createAccount(
 	payer flow.Address,
+	_ interpreter.InvocationContext,
 ) (
 	flow.Address,
 	error,

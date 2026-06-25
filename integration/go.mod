@@ -404,3 +404,7 @@ replace github.com/ipfs/boxo => github.com/onflow/boxo v0.0.0-20240201202436-f24
 replace github.com/ipfs/go-ds-pebble => github.com/onflow/go-ds-pebble v0.0.0-20251003225212-131edca3a897
 
 replace github.com/hashicorp/golang-lru/v2 => github.com/fxamacker/golang-lru/v2 v2.0.0-20250430153159-6f72f038a30f
+
+replace github.com/onflow/cadence => github.com/onflow/cadence-internal v1.10.4-rc.6
+
+replace github.com/onflow/atree => github.com/onflow/atree-internal v0.16.1-rc.2
