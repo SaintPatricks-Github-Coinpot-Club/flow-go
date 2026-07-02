@@ -215,8 +215,8 @@ require (
 	github.com/multiformats/go-varint v0.0.7 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
-	github.com/onflow/atree v0.16.0 // indirect
-	github.com/onflow/cadence v1.10.3 // indirect
+	github.com/onflow/atree v0.16.1 // indirect
+	github.com/onflow/cadence v1.10.4 // indirect
 	github.com/onflow/fixed-point v0.1.1 // indirect
 	github.com/onflow/flow-core-contracts/lib/go/contracts v1.10.3 // indirect
 	github.com/onflow/flow-core-contracts/lib/go/templates v1.10.3 // indirect
@@ -355,7 +355,3 @@ replace github.com/ipfs/boxo => github.com/onflow/boxo v0.0.0-20240201202436-f24
 replace github.com/ipfs/go-ds-pebble => github.com/onflow/go-ds-pebble v0.0.0-20251003225212-131edca3a897
 
 replace github.com/hashicorp/golang-lru/v2 => github.com/fxamacker/golang-lru/v2 v2.0.0-20250430153159-6f72f038a30f
-
-replace github.com/onflow/cadence => github.com/onflow/cadence-internal v1.10.4-rc.7
-
-replace github.com/onflow/atree => github.com/onflow/atree-internal v0.16.1-rc.3
