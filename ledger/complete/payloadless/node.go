@@ -317,7 +317,6 @@ func (n *Node) IsAllocatedRegisterLeaf() bool {
 	return n.leafHash != nil
 }
 
-// a height-0 allocated leaf is a degenerate compactified leaf, so returning true
 
 // computeHash returns the hashValue of the node
 func (n *Node) computeHash() hash.Hash {
