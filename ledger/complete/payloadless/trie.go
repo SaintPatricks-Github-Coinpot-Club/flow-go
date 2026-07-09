@@ -98,6 +98,11 @@ func (mt *MTrie) String() string {
 // ReadSingleLeafHash reads and returns the leaf hash for a single path.
 // Returns nil if no leaf exists at the given path or if the leaf represents
 // an unallocated register.
+//
+// CAUTION: the returned pointer aliases the trie node's internal leaf hash. Tries are immutable and
+// shared copy-on-write across trie versions, so the caller MUST NOT modify the pointee; doing so would
+// corrupt the node's cached hash. Callers needing a mutable hash must copy it (see the Forest layer,
+// which returns a defensive copy). Do NOT MODIFY the returned hash!
 func (mt *MTrie) ReadSingleLeafHash(path ledger.Path) *hash.Hash {
 	return readSingleLeafHash(path, mt.root)
 }
@@ -655,6 +660,11 @@ func EmptyTrieRootHash() ledger.RootHash {
 
 // AllLeafHashes returns all leaf hashes stored in the trie. Empty leaves
 // (unallocated registers) are skipped.
+//
+// CAUTION: each returned pointer aliases the corresponding trie node's internal leaf hash. Tries are
+// immutable and shared copy-on-write across trie versions, so the caller MUST NOT modify any pointee;
+// doing so would corrupt that node's cached hash. Callers needing mutable hashes must copy them. Do
+// NOT MODIFY the returned hashes!
 func (mt *MTrie) AllLeafHashes() []*hash.Hash {
 	return mt.root.AllLeafHashes()
 }
