@@ -335,7 +335,7 @@ func update(
 			// In most cases, the new register value will be different from the old value, in which case we need to instantiate a new leaf
 			// anyway. So we optimistically create the new leaf first. But if a posterior check reveals that the new leaf's hash is identical
 			// to the old `currentNode`, we just return `currentNode` to avoid duplication (optimistically created leaf is garbage collected).
-			n := NewLeaf(paths[0], values[0], nodeHeight)
+			n = NewLeaf(paths[0], values[0], nodeHeight)
 			if n.hashValue == currentNode.hashValue {
 				return currentNode, 0, nodeHeight
 			}
