@@ -317,7 +317,6 @@ func (n *Node) IsAllocatedRegisterLeaf() bool {
 	return n.leafHash != nil
 }
 
-
 // computeHash returns the hashValue of the node
 func (n *Node) computeHash() hash.Hash {
 	// check for leaf node

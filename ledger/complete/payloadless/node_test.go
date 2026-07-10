@@ -42,7 +42,7 @@ import (
 //   - `pathLeft`  = all bits 0  → left branch at every height  (empty sibling always on the RIGHT);
 //   - `pathRight` = all bits 1  → right branch at every height (empty sibling always on the LEFT);
 //   - `pathMixed` = 0x…0135     → interleaved: right,left,right,left,right,right,left,left,right over
-//                                 heights 1..9 (bit(255)=1, bit(254)=0, …).
+//     heights 1..9 (bit(255)=1, bit(254)=0, …).
 var (
 	pathLeft = testutils.PathByUint16LeftPadded(0) // 32 bytes 0x00
 	// pathRight is the all-ones path (32 bytes 0xFF): branches right at every height.
