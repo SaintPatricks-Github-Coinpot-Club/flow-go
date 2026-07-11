@@ -11,17 +11,25 @@ import (
 // Node defines a payloadless Mtrie node.
 //
 // Unlike the regular mtrie Node which stores full payloads, a payloadless Node
-// stores only the leaf hash (HashLeaf(path, value)) for leaf nodes. This enables
-// significant memory savings while preserving the same root hash as a full trie.
+// stores only the leaf hash for leaf nodes. This enables significant memory savings
+// while preserving the same root hash as a full trie.
 //
 // DEFINITIONS:
-//   - HEIGHT of a node v in a tree is the number of edges on the longest
-//     downward path between v and a tree leaf.
+//   - HEIGHT of a node v in a tree is the number of edges on the longest downward
+//     path between v and a tree leaf (in a hypothetical, fully expanded (perfect)
+//     tree, i.e. without compactification or nil-pruning).
 //
 // Conceptually, an MTrie is a sparse Merkle Trie, which has two node types:
 //   - INTERIM node: has at least one child (i.e. lChild or rChild is not
 //     nil). Interim nodes do not store a path and have no leafHash.
-//   - LEAF node: has _no_ children. Stores a path and (optionally) a leafHash.
+//   - LEAF node: has _no_ children. It represents a single register, storing a path and
+//     the ability to provide the hash commitment of the register's content. Nodes at height
+//     𝒽 = 0 are always leaves. Nodes with 𝒽 > 0 are either leaves or interim nodes. A leaf at
+//     height 𝒽 represents a height-𝒽 subtree that holds a single allocated register. Because
+//     such a subtree contains no branches, it is collapsed into one node — a COMPACTIFIED LEAF
+//     (per mtrie/README.md the term spans all heights 𝒽 ≥ 0). Compactification is optional and
+//     always root-hash-preserving. See documentation of `Node.leafHash` and `Node.hashValue`
+//     for storage and hashing details.
 //
 // Per convention, we also consider nil as a leaf. Formally, nil is the generic
 // representative for any empty (sub)-trie (i.e. a trie without allocated
@@ -31,21 +39,60 @@ import (
 // TODO: optimized data structures might be able to reduce memory consumption
 type Node struct {
 	// Implementation Comments:
-	// Formally, a tree can hold up to 2^maxDepth number of registers. However,
+	// Formally, a tree of height 𝒽 can hold up to 2^𝒽 number of registers. However,
 	// the current implementation is designed to operate on a sparsely populated
 	// tree, holding much less than 2^64 registers.
 
-	lChild    *Node       // Left Child
-	rChild    *Node       // Right Child
-	height    int         // height where the Node is at
-	path      ledger.Path // the storage path (dummy value for interim nodes)
-	leafHash  *hash.Hash  // HashLeaf(path, value) - the height-0 leaf hash (leaf nodes only; nil for unallocated registers)
-	hashValue hash.Hash   // hash value of node (cached)
+	height int         // height where the Node is at (root node has largest height of 256)
+	lChild *Node       // Left Child (nil for all leaves, including compactified leaves of height > 0)
+	rChild *Node       // Right Child (nil for all leaves, including compactified leaves of height > 0)
+	path   ledger.Path // the storage path (dummy value for interim nodes)
+
+	// leafHash is nil for all non-leaf nodes. For leaves (node with both children nil), leafHash
+	// is nil if and only if the leaf represents an unallocated register (value is nil or empty).
+	// Formally:
+	//              ╭ hash(path, value)    if len(value) > 0
+	//   leafHash = ┥
+	//              ╰ nil                  otherwise
+	leafHash *hash.Hash
+
+	// hashValue is the cached hash of this node (always set for every node). By construction,
+	// a node's hashValue equals the hash that the equivalent node would have in the fully-expanded
+	// (perfect) tree; compactification and nil-pruning are chosen precisely to preserve this
+	// value (see mtrie/README.md for details), which is why they leave the root hash unchanged.
+	//
+	// We specify hashValue per node *type* (independent of compactification or nil-pruning). Here
+	// DefaultHashForHeight(𝒽) denotes the hash of a subtree with height 𝒽 holding only unallocated
+	// registers (defined recursively in mtrie/README.md). DefaultHashForHeight is independent of
+	// the sub-trie's location in the overall trie (identical for all empty subtrees of height 𝒽).
+	//
+	//  • LEAF node (both children nil) at height 𝒽, for register (path, value):
+	//                  ╭ subtree-root hash for {(path, value)}   if len(value) > 0   (allocated)
+	//      hashValue = ┥
+	//                  ╰ DefaultHashForHeight(𝒽)                 if len(value) == 0  (unallocated)
+	//    where the `subtree-root hash for {(path, value)}` is the hash of the height-𝒽 subtree that
+	//    holds only this single register: start from the height-0 leaf with hash(path, value) and
+	//    hash upward 𝒽 levels, at each level combining with the default hash of the (empty) sibling
+	//    subtree. At 𝒽 == 0 the upward climb is empty, so this is just hash(path, value).
+	//
+	//  • INTERIM node (at least one non-nil child) at height 𝒽 > 0:
+	//      hashValue = hash( lChild.hashValue , rChild.hashValue )
+	//    where a nil child contributes DefaultHashForHeight(𝒽-1) (the hash of the empty
+	//    subtree of height 𝒽-1 it represents).
+	//
+	// Notes:
+	//  • For an allocated register, the height-0 leaf's hashValue equals its leafHash by design.
+	//  • hashValue == DefaultHashForHeight(𝒽)
+	//      ⟺ the sub-tree rooted at this node holds only unallocated registers
+	//      ⟺ every node in that sub-tree has leafHash == nil
+	//    (the forward direction relies on our requirement of a collision-resistant hash function).
+	hashValue hash.Hash
 }
 
 // NewNode creates a new Node.
-// UNCHECKED requirement: combination of values must conform to
-// a valid node type (see documentation of `Node` for details)
+// CAUTION: INSECURE! Only intended to reconstruct Nodes from their serialization!
+// UNCHECKED requirement: combination of values must conform to a valid node type (see
+// documentation of `Node` for details)
 func NewNode(height int,
 	lchild,
 	rchild *Node,
@@ -64,36 +111,114 @@ func NewNode(height int,
 	return n
 }
 
-// NewLeaf creates a leaf Node from a path and the original payload value.
-// The leafHash is computed as HashLeaf(path, value), and the node hash is
-// computed using the original value to ensure the same root hash as a full trie.
+// NewLeaf constructs the leaf Node 𝓃 representing the single register (path, value) at the
+// given height 𝒽. By construction, 𝓃.Hash() equals the hash that the height-𝒽 subtree
+// containing the register would have in the fully-expanded trie. In other words, tries built
+// from these constructors share the same root hash as a fully-expanded trie. That subtree hash
+// is computed by compactification: the recursive application of hashing (see mtrie/README.md for
+// details). It starts from the register's height-0 leaf hash and hashes upward 𝒽 levels,
+// combining at each level with the default hash of the empty sibling subtree.
 //
-// UNCHECKED requirement: height must be non-negative
+// A `nil` or empty `value` denotes an unallocated register; the result is the default node for the
+// given height (hash is DefaultHashForHeight(height) independent of path; see newDefaultLeaf for details).
+//
+// It is safe for `path` or `value` to be mutated after the call to `NewLeaf` returns.
+//
+// UNCHECKED requirement: height must be non-negative.
 func NewLeaf(path ledger.Path, value []byte, height int) *Node {
-	// For empty values, create a default node
-	if len(value) == 0 {
-		return &Node{
-			height:    height,
-			path:      path,
-			leafHash:  nil,
-			hashValue: ledger.GetDefaultHashForHeight(height),
-		}
+	if len(value) == 0 { // For empty values, create a default node
+		return newDefaultLeaf(path, height)
 	}
 
-	// Compute the leaf hash (height-0)
-	leafHash := hash.HashLeaf(hash.Hash(path), value)
-
-	return NewLeafWithHash(path, leafHash, height)
+	// Leaf represent an allocated register:
+	leafHash := hash.HashLeaf(hash.Hash(path), value) // we pre-compute leaf hash at height-0 here
+	return newLeafWithHash(path, leafHash, height)    // handles compactification up to given height if necessary
 }
 
-// NewLeafWithHash creates a leaf Node from a pre-computed leaf hash.
-// This is used when converting from a full trie or loading from a payloadless checkpoint.
+// newDefaultLeaf constructs the default node, which represents an unallocated register (`nil` or empty value)
+// compactified to a trie node at the given height. Its leafHash is nil and its hash is DefaultHashForHeight(height).
 //
+// Note that the hash of an empty subtree (at any height) is technically independent of path. However, subtries
+// containing only unallocated registers should be replaced by nil in a compactified trie. Explicitly creating a
+// default node is only useful if the caller wants to deliberately represent a specific register that is
+// not yet allocated. Explicitly representing specific unallocated registers is an interim shortcut until we have
+// specialized (more efficient) non-inclusion proofs implemented (at the moment, non-inclusion proofs fall back
+// on inclusion proofs of explicitly represented default nodes).
+//
+// It is safe for `path` to be mutated after this function returns.
+//
+// UNCHECKED requirement: height must be non-negative.
+func newDefaultLeaf(path ledger.Path, height int) *Node {
+	return &Node{
+		height:    height,
+		path:      path,
+		leafHash:  nil,
+		hashValue: ledger.GetDefaultHashForHeight(height),
+	}
+}
+
+// NewRelevelledLeaf creates a new compactified leaf 𝓁' for the same register (path, value) as the input
+// leaf 𝓁, re-levelled to height `relevellingHeight`. This is needed when a register r is allocated or
+// removed in the neighbourhood of 𝓁, changing the height at which 𝓁 can be compactified. Example:
+//
+//	     trie without r                 trie with r
+//
+//	        parent                        parent
+//	       ╱    ╲                         ╱    ╲
+//	      𝓁      △         ◀──▶          ◯      △        height 𝒽
+//	      ┊                            ╱  ╲
+//	      ┊                           𝓁'   𝓃             height 𝒽-1
+//	      ┊                           ┊
+//	      •                           •                  height 0 (fully-expanded perfect trie)
+//
+//	parent : genuine branch at height 𝒽+1; its other child △ is a non-empty sibling subtree
+//	         (the reason 𝓁 sits at height 𝒽, not higher). Unchanged by allocating r.
+//	◯      : interim node materialized at 𝓁's former position ( height-𝒽 ).
+//	𝓁, 𝓁'  : the SAME register (path, value); 𝓁' is 𝓁 re-levelled to a lower height 𝒽' (𝒽-1 shown).
+//	𝓃      : compactified leaf representing register r.
+//	•      : the register's actual leaf at height 0 in the fully-expanded (perfect) trie.
+//	dotted : single-child perfect-trie path (┊) that compactification collapses into one node.
+//
+// Implementation correctly handles leaves that represent either allocated or unallocated registers. For an
+// unallocated register represented by an explicit default leaf (which carries the register's path), a new
+// default leaf at `relevellingHeight` is created; this is useful for our shortcut for non-inclusion proofs
+// utilizing explicitly represented default leaf nodes. A `nil` input yields a `nil` result.
+//
+// UNCHECKED requirement: `leaf.IsLeaf()` must be true
+func NewRelevelledLeaf(leaf *Node, relevellingHeight int) *Node {
+	// If the leaf represents an unallocated register, return the default node at the relevelling height.
+	// Implementation details:
+	//   - A nil input represents an empty sub-trie that carries no register path. By convention a default leaf
+	//     must carry the path of the register it represents, which a nil input cannot supply, so we return nil
+	//     (an empty sub-trie stays empty).
+	//   - A default leaf (leafHash == nil, i.e. an unallocated register) is relevelled to the default node at height `relevellingHeight`.
+	//     The resulting node's hash is `DefaultHashForHeight(relevellingHeight)`; it is path-independent, but height-dependent.
+	//   - For an allocated register (leafHash ≠ nil), the `leafHash` by convention always contains the hash of the fully-expanded leaf at
+	//     height 0. The hash of any compactified leaf is computed by iteratively hashing the `leafHash` together with the
+	//     default hash at the corresponding height (sibling subtree representing only empty registers).
+	if leaf == nil { // empty sub-trie carries no register path => cannot form a path-bearing default leaf; stays empty
+		return nil
+	}
+	if leaf.leafHash == nil { // leaf.leafHash is nil ⟺ unallocated register ⟺ node is a default leaf
+		return newDefaultLeaf(leaf.path, relevellingHeight)
+	}
+	if relevellingHeight == leaf.height { // same height => no relevelling needed
+		return leaf
+	}
+
+	// Leaf represent an allocated register:
+	return newLeafWithHash(leaf.path, *leaf.leafHash, relevellingHeight) // handles compactification up to given relevellingHeight if necessary
+}
+
+// newLeafWithHash creates a leaf Node from a pre-computed leaf hash.
+// This is used when converting from a full trie or loading from a payloadless checkpoint.
 // The nodeHash is computed by extending the leafHash (height-0) to the specified height.
+//
+// It is safe for `path` to be mutated after this function returns.
 //
 // UNCHECKED requirement: height must be non-negative
 // UNCHECKED requirement: leafHash must be HashLeaf(path, originalValue)
-func NewLeafWithHash(path ledger.Path, leafHash hash.Hash, height int) *Node {
+func newLeafWithHash(path ledger.Path, leafHash hash.Hash, height int) *Node {
 	// Compute the node hash by extending the leaf hash to the target height
 	nodeHash := ledger.ComputeCompactValueFromLeafHash(hash.Hash(path), leafHash, height)
 
@@ -118,7 +243,7 @@ func NewInterimNode(height int, lChild, rChild *Node) *Node {
 	return n
 }
 
-// NewInterimCompactifiedNode creates a new compactified interim Node. For compactification,
+// NewInterimCompactifiedNode creates a new interim Node - compactified if possible. For compactification,
 // we only consider the immediate children. When starting with a maximally pruned trie and
 // creating only InterimCompactifiedNodes during an update, the resulting trie remains maximally
 // pruned. Details on compactification:
@@ -140,7 +265,7 @@ func NewInterimCompactifiedNode(height int, lChild, rChild *Node) *Node {
 
 	// CASE (a): _both_ children do _not_ contain any allocated registers:
 	if lChild == nil && rChild == nil {
-		return nil // return nil representing as completely empty sub-trie
+		return nil // return nil representing a completely empty sub-trie
 	}
 
 	// CASE (b): one child is a compactified leaf (single allocated register) _and_ the other child represents
@@ -154,18 +279,42 @@ func NewInterimCompactifiedNode(height int, lChild, rChild *Node) *Node {
 		return &Node{height: height, path: rChild.path, leafHash: rChild.leafHash, hashValue: h}
 	}
 
-	// CASE (b): both children contain some allocated registers => we can't compactify; return a full interim leaf
+	// CASE (c): both children contain some allocated registers => we can't compactify; return a full interim node
 	return NewInterimNode(height, lChild, rChild)
 }
 
 // IsDefaultNode returns true iff the sub-trie represented by this root node contains
-// only unallocated registers. This is the case, if the node is nil or the node's hash
-// is equal to the default hash value at the respective height.
+// only unallocated registers. This is the case, if and only if the node is nil or the
+// node's hash is equal to the default hash value at the respective height.
+//
+// This function is universally applicable, irrespective of compactification, nil-pruning,
+// or whether the node is a leaf or an interim node.
 func (n *Node) IsDefaultNode() bool {
 	if n == nil {
 		return true
 	}
 	return n.hashValue == ledger.GetDefaultHashForHeight(n.height)
+}
+
+// IsAllocatedRegisterLeaf reports whether this node is a leaf representing an allocated register
+// (equivalently, a non-default compactified leaf, at any height 𝒽 ≥ 0). It is a computationally very lightweight
+// check intended to be run on leaf nodes, optimized for minimal computational cost rather than universal applicability.
+//
+// On leaves it coincides with the negation of `IsDefaultNode`:
+//
+//	𝓃.IsAllocatedRegisterLeaf() = ¬ 𝓃.IsDefaultNode()  for any node 𝓃 with 𝓃.IsLeaf() == true
+//
+// CAUTION:
+//   - For non-leaf nodes, this function always returns false. We do *not* check whether the node could be
+//     compactified into a non-default leaf. This is a deliberate trade-off for minimal computational cost.
+//   - A false result therefore does NOT imply the sub-trie is empty/default: any interim node returns
+//     false regardless of the subtree beneath it. To test whether a sub-trie is empty/default, use the
+//     universally-applicable `IsDefaultNode`.
+func (n *Node) IsAllocatedRegisterLeaf() bool {
+	if n == nil {
+		return false
+	}
+	return n.leafHash != nil
 }
 
 // computeHash returns the hashValue of the node
@@ -180,7 +329,7 @@ func (n *Node) computeHash() hash.Hash {
 		return ledger.GetDefaultHashForHeight(n.height)
 	}
 
-	// this is an interim node at least one of lChild or rChild is not nil.
+	// this is an interim node; at least one of lChild or rChild is non-nil.
 	var h1, h2 hash.Hash
 	if n.lChild != nil {
 		h1 = n.lChild.Hash()
@@ -196,7 +345,8 @@ func (n *Node) computeHash() hash.Hash {
 	return hash.HashInterNode(h1, h2)
 }
 
-// VerifyCachedHash verifies the hash of a node is valid
+// verifyCachedHashRecursive recursively verifies that every node in the subtree
+// rooted at n has a cached hashValue matching its recomputed hash.
 func verifyCachedHashRecursive(n *Node) bool {
 	if n == nil {
 		return true
@@ -209,13 +359,16 @@ func verifyCachedHashRecursive(n *Node) bool {
 	return n.hashValue == computedHash
 }
 
-// VerifyCachedHash verifies the hash of a node is valid
+// VerifyCachedHash verifies that every node in the subtree rooted at this node has
+// a cached `hashValue` matching its freshly recomputed hash.
+// CAUTION: this recomputes the hash of every node in the subtree and is therefore
+// very expensive on large tries.
 func (n *Node) VerifyCachedHash() bool {
 	return verifyCachedHashRecursive(n)
 }
 
-// Hash returns the Node's hash value.
-// Do NOT MODIFY returned slice!
+// Hash returns the Node's cached hash value, which is a fixed-size array, so the
+// returned value is a copy; mutating it does not affect the Node.
 func (n *Node) Hash() hash.Hash {
 	return n.hashValue
 }
@@ -255,7 +408,7 @@ func (n *Node) RightChild() *Node { return n.rChild }
 
 // IsLeaf returns true if and only if Node is a LEAF.
 func (n *Node) IsLeaf() bool {
-	// Per definition, a node is a leaf if and only it has no children
+	// Per definition, a node is a leaf if and only if it has no children
 	return n == nil || (n.lChild == nil && n.rChild == nil)
 }
 
