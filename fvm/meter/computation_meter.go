@@ -119,7 +119,8 @@ func (m *ComputationMeter) ComputationRemaining(kind common.ComputationKind) uin
 		return 0
 	}
 
-	return (m.params.computationLimit - m.computationUsed) / w // never undeflows, as we handled the m.params.computationLimit  ≤ m.computationUsed above 
+	// never underflows, as we handled the m.params.computationLimit ≤ m.computationUsed above
+	return (m.params.computationLimit - m.computationUsed) / w
 }
 
 // ComputationIntensities returns all the measured computational intensities
