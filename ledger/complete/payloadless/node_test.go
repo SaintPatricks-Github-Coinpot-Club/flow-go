@@ -515,7 +515,15 @@ func Test_InterimNodeWithoutChildren(t *testing.T) {
 }
 
 // Test_InterimNodeWithOneChild verifies that the hash value of an interim node with
-// only one child (left or right) is computed correctly.
+// only one child (left or right) is computed correctly. The nil sibling contributes
+// DefaultHashForHeight(h-1), which is why the left-only and right-only nodes below hash
+// differently:
+//
+//	NewInterimNode(1, c, nil)          NewInterimNode(1, nil, c)
+//	        (h=1)                              (h=1)
+//	        /    \                             /    \
+//	 c=Leaf(56809)  nil=D(0)          nil=D(0)  c=Leaf(56809)
+//	     (h=0)                                      (h=0)
 func Test_InterimNodeWithOneChild(t *testing.T) {
 	path := testutils.PathByUint16(56809)
 	v := []byte(testutils.LightPayload(56810, 59656).Value())
@@ -531,7 +539,17 @@ func Test_InterimNodeWithOneChild(t *testing.T) {
 }
 
 // Test_InterimNodeWithBothChildren verifies that the hash value of an interim node with
-// both children (left and right) is computed correctly.
+// both children (left and right) is computed correctly:
+//
+//	NewInterimNode(1, leftChild, rightChild)
+//	              (h=1)
+//	              /   \
+//	 leftChild=Leaf    rightChild=Leaf
+//	   (56809, h=0)       (2, h=0)
+//
+// Note: the construction is synthetic — the child paths are not consistent with their
+// branch positions (NewInterimNode does not validate this); only the resulting node hash
+// (a function of the two child hashes) is under test.
 func Test_InterimNodeWithBothChildren(t *testing.T) {
 	leftPath := testutils.PathByUint16(56809)
 	leftValue := []byte(testutils.LightPayload(56810, 59656).Value())
@@ -547,16 +565,49 @@ func Test_InterimNodeWithBothChildren(t *testing.T) {
 }
 
 // Test_AllLeafHashes verifies that AllLeafHashes collects the leaf hash of every allocated register in
-// the subtree (here: three leaves across a small two-level interim structure).
+// the subtree (here: three leaves across a small two-level interim structure), and that unallocated
+// (default) leaves are skipped. Structure under test:
+//
+//	          n5 (h=2)
+//	         /        \
+//	     n4 (h=1)      n6 (h=1)
+//	     /     \        /    \
+//	n1 (h=0) n2 (h=0) n3(h=0) n_default(h=0)
+//
+// n1, n2, n3 are distinct allocated registers; n_default is an unallocated register.
+// AllLeafHashes must return exactly the three hashes for n1, n2, n3 and skip n_default.
 func Test_AllLeafHashes(t *testing.T) {
-	path := testutils.PathByUint16(1)
-	v := []byte(testutils.LightPayload(2, 3).Value())
-	n1 := NewLeaf(path, v, 0)
-	n2 := NewLeaf(path, v, 0)
-	n3 := NewLeaf(path, v, 1)
+	path1 := testutils.PathByUint16(1)
+	path2 := testutils.PathByUint16(2)
+	path3 := testutils.PathByUint16(3)
+	path4 := testutils.PathByUint16(4) // unallocated
+
+	v1 := []byte(testutils.LightPayload(2, 3).Value())
+	v2 := []byte(testutils.LightPayload(4, 5).Value())
+	v3 := []byte(testutils.LightPayload(6, 7).Value())
+
+	n1 := NewLeaf(path1, v1, 0)
+	n2 := NewLeaf(path2, v2, 0)
+	n3 := NewLeaf(path3, v3, 0)
+	nDefault := NewLeaf(path4, nil, 0) // default (unallocated) leaf; AllLeafHashes must skip this
+
 	n4 := NewInterimNode(1, n1, n2)
-	n5 := NewInterimNode(2, n4, n3)
-	require.Equal(t, 3, len(n5.AllLeafHashes()))
+	n6 := NewInterimNode(1, n3, nDefault)
+	n5 := NewInterimNode(2, n4, n6)
+
+	leafHashes := n5.AllLeafHashes()
+	require.Equal(t, 3, len(leafHashes))
+
+	// Verify the returned set equals the three expected leaf hashes.
+	expected := map[hash.Hash]bool{
+		hash.HashLeaf(hash.Hash(path1), v1): true,
+		hash.HashLeaf(hash.Hash(path2), v2): true,
+		hash.HashLeaf(hash.Hash(path3), v3): true,
+	}
+	for _, lh := range leafHashes {
+		require.NotNil(t, lh)
+		require.Truef(t, expected[*lh], "unexpected leaf hash returned by AllLeafHashes: %x", *lh)
+	}
 }
 
 // ---------------------------------------------------------------------------------------------

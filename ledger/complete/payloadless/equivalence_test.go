@@ -317,9 +317,90 @@ func TestEquivalence_UnsafeProofs(t *testing.T) {
 	}
 }
 
+// TestEquivalence_UnsafeProofs_NoPruning verifies structural proof equivalence for an
+// unpruned trie (prune=false). With pruning disabled, unallocated registers are kept as
+// explicit default leaves; their proofs carry Inclusion=true but an empty payload (mtrie)
+// or nil LeafHash (payloadless).
+func TestEquivalence_UnsafeProofs_NoPruning(t *testing.T) {
+	rng := &LinearCongruentialGenerator{seed: 1}
+	paths, values := deduplicateWrites(sampleRandomRegisterWrites(rng, 300))
+
+	// Build both tries with all registers allocated.
+	m, pl := applyToBoth(t,
+		trie.NewEmptyMTrie(), payloadless.NewEmptyMTrie(),
+		paths, values, true,
+	)
+
+	// Unallocate the first quarter without pruning, keeping them as explicit default leaves.
+	numUnalloc := len(paths) / 4
+	unallocValues := make([][]byte, numUnalloc) // all nil
+	m, pl = applyToBoth(t, m, pl, paths[:numUnalloc], unallocValues, false)
+
+	require.Equal(t, uint64(len(paths)-numUnalloc), pl.AllocatedRegCount())
+	require.Equal(t, m.AllocatedRegCount(), pl.AllocatedRegCount())
+
+	// Build three query categories:
+	//  (a) still-allocated:        paths[numUnalloc : len(paths)/2]
+	//  (b) explicitly unallocated: paths[:numUnalloc]
+	//  (c) never allocated:        synthetic 0xfe.. paths
+	queryPaths := make([]ledger.Path, 0)
+	queryPaths = append(queryPaths, paths[numUnalloc:len(paths)/2]...)
+	queryPaths = append(queryPaths, paths[:numUnalloc]...)
+	for i := 0; i < 10; i++ {
+		var p ledger.Path
+		p[0] = byte(0xfe)
+		p[31] = byte(i)
+		queryPaths = append(queryPaths, p)
+	}
+
+	mPaths := make([]ledger.Path, len(queryPaths))
+	copy(mPaths, queryPaths)
+	plPaths := make([]ledger.Path, len(queryPaths))
+	copy(plPaths, queryPaths)
+
+	mBatch := m.UnsafeProofs(mPaths)
+	plBatch := pl.UnsafeProofs(plPaths)
+	require.Equal(t, mBatch.Size(), plBatch.Size())
+
+	mByPath := make(map[ledger.Path]*ledger.TrieProof, len(mPaths))
+	for i, p := range mPaths {
+		mByPath[p] = mBatch.Proofs[i]
+	}
+	plByPath := make(map[ledger.Path]*ledger.PayloadlessTrieProof, len(plPaths))
+	for i, p := range plPaths {
+		plByPath[p] = plBatch.Proofs[i]
+	}
+
+	for _, p := range queryPaths {
+		mp := mByPath[p]
+		plp := plByPath[p]
+
+		require.Equalf(t, mp.Inclusion, plp.Inclusion, "Inclusion mismatch for path %x", p[:])
+		require.Equalf(t, mp.Steps, plp.Steps, "Steps mismatch for path %x", p[:])
+		require.Equalf(t, mp.Flags, plp.Flags, "Flags mismatch for path %x", p[:])
+		require.Equalf(t, mp.Interims, plp.Interims, "Interims mismatch for path %x", p[:])
+		require.Equal(t, mp.Path, plp.Path)
+
+		if mp.Inclusion {
+			if mp.Payload.IsEmpty() {
+				// Explicitly-unallocated register (default leaf kept by prune=false):
+				// payloadless reports Inclusion=true with LeafHash=nil.
+				require.Nilf(t, plp.LeafHash,
+					"payloadless should report nil LeafHash for explicitly-unallocated path %x", p[:])
+			} else {
+				require.NotNilf(t, plp.LeafHash,
+					"payloadless should report non-nil LeafHash for allocated path %x", p[:])
+				expected := hash.HashLeaf(hash.Hash(mp.Path), []byte(mp.Payload.Value()))
+				require.Equalf(t, expected, *plp.LeafHash, "leaf hash mismatch for path %x", p[:])
+			}
+		}
+	}
+}
+
 // TestEquivalence_RandomWalk runs random allocations, updates, and
-// unallocations on both implementations and checks the root hash, register
-// count, and per-path reads agree after every step.
+// unallocations on both implementations and verifies the root hash, register
+// count, and per-path reads (via UnsafeRead over the live set and recently
+// unallocated paths) agree after every step.
 func TestEquivalence_RandomWalk(t *testing.T) {
 	rand := unittest.GetPRG(t)
 
@@ -371,6 +452,63 @@ func TestEquivalence_RandomWalk(t *testing.T) {
 		require.Equalf(t, m.RootHash(), pl.RootHash(), "root hashes diverged at step %d", step)
 		require.Equalf(t, uint64(len(live)), pl.AllocatedRegCount(), "reg count mismatch at step %d", step)
 		require.Equal(t, m.AllocatedRegCount(), pl.AllocatedRegCount())
+
+		// Per-path read: verify all live registers agree between implementations.
+		if len(live) > 0 {
+			livePaths := make([]ledger.Path, 0, len(live))
+			for p := range live {
+				livePaths = append(livePaths, p)
+			}
+			mReadPaths := make([]ledger.Path, len(livePaths))
+			copy(mReadPaths, livePaths)
+			plReadPaths := make([]ledger.Path, len(livePaths))
+			copy(plReadPaths, livePaths)
+
+			mPayloads := m.UnsafeRead(mReadPaths)
+			plHashes := pl.UnsafeRead(plReadPaths)
+
+			// Index by path since UnsafeRead permutes the paths slice in place.
+			mByPath := make(map[ledger.Path]*ledger.Payload, len(livePaths))
+			for i, p := range mReadPaths {
+				mByPath[p] = mPayloads[i]
+			}
+			plByPath := make(map[ledger.Path]*hash.Hash, len(livePaths))
+			for i, p := range plReadPaths {
+				plByPath[p] = plHashes[i]
+			}
+
+			for p, expectedValue := range live {
+				require.Falsef(t, mByPath[p].IsEmpty(), "mtrie should return non-empty payload for live path at step %d", step)
+				require.NotNilf(t, plByPath[p], "payloadless missing live path at step %d", step)
+				expectedLeafHash := hash.HashLeaf(hash.Hash(p), expectedValue)
+				require.Equalf(t, expectedLeafHash, *plByPath[p], "leaf hash mismatch for live path at step %d", step)
+			}
+		}
+
+		// Per-path read: verify recently-unallocated paths return nil in both implementations.
+		deadPaths := make([]ledger.Path, 0)
+		for i, v := range updateValues {
+			if v == nil {
+				if _, stillLive := live[updatePaths[i]]; !stillLive {
+					deadPaths = append(deadPaths, updatePaths[i])
+				}
+			}
+		}
+		if len(deadPaths) > 0 {
+			mDeadPaths := make([]ledger.Path, len(deadPaths))
+			copy(mDeadPaths, deadPaths)
+			plDeadPaths := make([]ledger.Path, len(deadPaths))
+			copy(plDeadPaths, deadPaths)
+
+			mDeadPayloads := m.UnsafeRead(mDeadPaths)
+			plDeadHashes := pl.UnsafeRead(plDeadPaths)
+
+			for i := range deadPaths {
+				// mtrie.UnsafeRead returns EmptyPayload() (non-nil) for missing paths; payloadless returns nil.
+				require.Truef(t, mDeadPayloads[i].IsEmpty(), "mtrie should return empty payload for unallocated path at step %d", step)
+				require.Nilf(t, plDeadHashes[i], "payloadless should return nil for unallocated path at step %d", step)
+			}
+		}
 	}
 }
 

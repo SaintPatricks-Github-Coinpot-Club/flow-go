@@ -80,9 +80,9 @@ func Test_TrieWithMiddleRegister(t *testing.T) {
 	path := testutils.PathByUint16LeftPadded(56809)
 	value := payloadValue(testutils.LightPayload(12346, 59656))
 	leftPopulatedTrie, maxDepthTouched, err := payloadless.NewTrieWithUpdatedRegisters(emptyTrie, []ledger.Path{path}, [][]byte{value}, true)
+	require.NoError(t, err)
 	require.Equal(t, uint16(0), maxDepthTouched)
 	require.Equal(t, uint64(1), leftPopulatedTrie.AllocatedRegCount())
-	require.NoError(t, err)
 	expectedRootHashHex := "4a29dad0b7ae091a1f035955e0c9aab0692b412f60ae83290b6290d4bf3eb296"
 	require.Equal(t, expectedRootHashHex, rootHashToString(leftPopulatedTrie.RootHash()))
 }
@@ -217,16 +217,23 @@ func Test_UnallocateRegisters(t *testing.T) {
 	// we then write an additional 117 registers
 	paths2, values2 := deduplicateWrites(sampleRandomRegisterWrites(rng, 117))
 	updatedTrie, maxDepthTouched, err = payloadless.NewTrieWithUpdatedRegisters(updatedTrie, paths2, values2, true)
+	require.NoError(t, err)
 	require.Equal(t, uint16(254), maxDepthTouched)
 	require.Equal(t, uint64(len(values1)+len(values2)), updatedTrie.AllocatedRegCount())
-	require.NoError(t, err)
 
-	// and now we override the first 99 registers with default values, i.e. unallocate them
+	// and now we override the first 99 registers with default values, i.e. unallocate them.
+	// Mix nil and []byte{} values to verify both representations of "unallocated" are equivalent.
 	emptyValues0 := make([][]byte, len(values1))
+	for i := range emptyValues0 {
+		if i%2 == 0 {
+			emptyValues0[i] = []byte{}
+		}
+		// odd indices remain nil
+	}
 	updatedTrie, maxDepthTouched, err = payloadless.NewTrieWithUpdatedRegisters(updatedTrie, paths1, emptyValues0, true)
+	require.NoError(t, err)
 	require.Equal(t, uint16(254), maxDepthTouched)
 	require.Equal(t, uint64(len(values2)), updatedTrie.AllocatedRegCount())
-	require.NoError(t, err)
 
 	// this should be identical to the first 99 registers never been written
 	expectedRootHashHex := "d81e27a93f2bef058395f70e00fb5d3c8e426e22b3391d048b34017e1ecb483e"
@@ -328,7 +335,7 @@ func TestSplitByPath(t *testing.T) {
 	const pathsNumber = 100
 	const redundantPaths = 10
 	const pathsSize = 32
-	randomIndex := rand.Intn(pathsSize)
+	randomIndex := rand.Intn(pathsSize * 8)
 
 	// create path slice with redundant paths
 	paths := make([]ledger.Path, 0, pathsNumber)
@@ -364,7 +371,7 @@ func TestSplitByPath(t *testing.T) {
 	sort.Slice(paths, func(i, j int) bool {
 		return bytes.Compare(paths[i][:], paths[j][:]) < 0
 	})
-	for i := index; i < len(paths); i++ {
+	for i := 0; i < len(paths); i++ {
 		assert.Equal(t, paths[i], sortedPaths[i])
 	}
 }
@@ -433,9 +440,9 @@ func Test_DifferentiateEmptyVsLeaf(t *testing.T) {
 	updatedPaths := append(leftSubTriePath, unallocatedRegister)
 	updatedValues := [][]byte{nil, nil}
 	updatedTrie, maxDepthTouched, err := payloadless.NewTrieWithUpdatedRegisters(startTrie, updatedPaths, updatedValues, true)
+	require.NoError(t, err)
 	require.Equal(t, uint16(256), maxDepthTouched)
 	require.Equal(t, uint64(len(rightSubTrieValue)), updatedTrie.AllocatedRegCount())
-	require.NoError(t, err)
 
 	// The updated trie should equal to a trie containing only the right sub-Trie
 	expectedUpdatedRootHashHex := "576e12a7ef5c760d5cc808ce50e9297919b21b87656b0cc0d9fe8a1a589cf42c"
@@ -801,7 +808,7 @@ func TestTrieAllocatedRegCount(t *testing.T) {
 		// (old value empty and new value present)
 		updatedTrieNoPruning, maxDepthTouched, err = payloadless.NewTrieWithUpdatedRegisters(updatedTrieNoPruning, paths, values, false)
 		require.NoError(t, err)
-		require.Equal(t, rootHash, updatedTrie.RootHash())
+		require.Equal(t, rootHash, updatedTrieNoPruning.RootHash())
 		require.True(t, maxDepthTouched <= 256)
 		require.Equal(t, uint64(len(values)), updatedTrieNoPruning.AllocatedRegCount())
 	})
