@@ -118,8 +118,11 @@ func lookupKeyToRegisterID(lookupKey []byte) (uint64, flow.RegisterID, error) {
 		owner = string(lookupKey[:flow.AddressLength])
 		key = string(lookupKey[flow.AddressLength+1:])
 	case lookupKey[0] == '/':
+		// global registers have an empty owner
+		owner = ""
 		key = string(lookupKey[1:])
 	default:
+		// only the two cases above are valid; anything else is a malformed key
 		return 0, flow.RegisterID{},
 			fmt.Errorf("invalid lookup key format: cannot find owner/key separator")
 	}
